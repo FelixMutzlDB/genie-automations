@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+*.egg-info/
+dist/
+build/
+
+# Databricks
+.databricks/
+.databricks-login.json
+databricks.yml.bak
+
+# Node / app
+node_modules/
+.next/
+dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Data (never commit customer or synthetic payloads)
+data/
+*.csv
+!tasks/**/schema/*_example.csv
+synthetic_data/
