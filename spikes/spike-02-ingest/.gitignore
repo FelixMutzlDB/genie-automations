@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+# generated corpus + hostile artifacts (reproducible via gen_*.py)
+corpus/*.xlsx
+corpus/*.csv
+corpus/*.truth.json
+hostile/*.xlsx
+hostile/*.xlsm
