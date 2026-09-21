@@ -1,59 +1,65 @@
 # Spike 2 — deterministic xlsx/csv ingest (+ untrusted Volume sandbox)
 
 Spec: [`../../docs/plan/06-spike-specs.md`](../../docs/plan/06-spike-specs.md) (Spike 2)
-and [`../../docs/plan/02-config-and-ingest-router-contract.md`](../../docs/plan/02-config-and-ingest-router-contract.md).
+and [`../../docs/plan/02-config-and-ingest-contract.md`](../../docs/plan/02-config-and-ingest-contract.md).
 
 Proves the **money path** — xlsx/csv (the hard requirement) parsed by a
 DETERMINISTIC reader so financial numbers never touch a probabilistic model
-(ADR-005). Images / freeform chat use the probabilistic path (confidence-gated +
-human-confirm) and are **not** built here yet.
+(ADR-005). Images / freeform chat use a separate probabilistic path (not built here).
+
+> **Hardened after the partner code review (v2).** Governing rule on the money
+> path: **reject-never-guess**. Locale, sheet selection, numeric grammar and the
+> formula policy are **per-automation config**, not per-value inference — the
+> scary failures are the ones that pass a clean corpus and silently emit a wrong
+> number or drop a row.
 
 ## Status — deterministic path GREEN (local)
 
 ```
-corpus:  6/6 files @ 100.0% field accuracy (clean xlsx/csv, header-offset+alias,
-         German locale numbers, multi-sheet decoy, EN thousands)
-hostile: 6/6 rejected with exact IG### code (wrong-magic, encrypted/OLE, .xlsm,
-         injected vbaProject.bin, zip-bomb, over-row-cap)
+corpus:  8/8 @ 100% field accuracy — clean xlsx/csv, header-offset+alias, German
+         locale (comma-decimal), totals-row (skipped, not double-counted),
+         multi-sheet decoy, EN thousands, semicolon+cp1252 CSV
+hostile: 9/9 rejected with exact IG### code — wrong-magic, OLE2 (IG015),
+         encrypted (IG003), .xlsm, vbaProject.bin, zip-bomb, over-row-cap,
+         formula-in-money (IG010), two-matching-sheets (IG011)
+units:   4/4 — injective binding (IG012), serial+datetime dates, parens-negative
+         de-locale, locale-pinned (de '1.234'=1234 while en rejects it — no 1000x)
 ```
 
-## What this scaffold contains
+## Review fixes folded in
 
-| Path | Purpose |
-|---|---|
-| `parser/parse.py` | deterministic xlsx/csv reader: magic-byte gate, zip-bomb + size/rows/cols/sheets caps, `data_only` (cached values not formulas), strict money-column binding with **reject-on-ambiguity**, locale→Decimal, Excel-serial→ISO, formula-injection neutralization, per-row provenance (`source_sha256`, sheet, row). `IG###` reject codes. |
-| `corpus/gen_corpus.py` | generates messy-but-legal xlsx/csv + per-file `*.truth.json` ground truth |
-| `hostile/gen_hostile.py` | generates hostile inputs the parser must reject within caps |
-| `harness/run_spike2.py` | accuracy (money compared numerically) + hostile-rejection harness with per-modality bar |
+per-config locale (no silent 1000×) · formulas in required fields rejected
+(cache can be stale/None) · **injective** header binding · sheet selection is
+config-named or single-unambiguous-visible (hidden skipped) · single-pass read +
+`rows>0` assert · totals/summary rows skipped via empty key-columns · dates honor
+`wb.epoch` (1900/1904 + serial-60) + datetime passthrough · CSV size/row caps,
+sniffed/config delimiter, cp1252 fallback → `R_ENCODING` · archive hardening
+(member count/size caps, encrypted-flag + duplicate-member reject) · text
+control-char strip + length cap.
 
-## Governed Volume (untrusted sandbox)
+## Governed Volume (untrusted sandbox) + live e2e
 
-Created: `/Volumes/felix_demo_catalog/genie-automations/raw_uploads/` (managed).
-All uploads land here FIRST as raw bytes (retain + SHA-256), treated as data
-never instructions, validated before anything becomes writable.
+`/Volumes/felix_demo_catalog/genie-automations/raw_uploads/` (managed). All
+uploads land here first (raw bytes + SHA-256, data-not-instructions). **Live
+end-to-end proven** (`harness/volume_e2e.py`): upload → download-from-Volume →
+deterministic parse → seed roots → stage → `commit_change` (SP/batch ingest
+identity) → audit, on the live `genie-automations` Lakebase project.
 
-## Run it (local — parser needs no Databricks)
+## Run it
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install openpyxl
-python corpus/gen_corpus.py && python hostile/gen_hostile.py
-python harness/run_spike2.py
+python corpus/gen_corpus.py && python hostile/gen_hostile.py && python harness/run_spike2.py
 ```
-
-## Exit criteria (per-modality bar)
-
-- xlsx/csv field exact-match ≥ 99.5% well-formed, ≥ 98% messy-legal ✅ (100% on current corpus)
-- hostile files 100% rejected within caps (no OOM/hang) ✅
-- human-confirm mandatory for the probabilistic (image/chat) path regardless of bar
 
 ## Still TODO (kept honest)
 
-- **Merged-cell headers** and **bottom-of-sheet totals rows** — in the edge-case
-  register; parser + corpus follow-up (would currently include a totals row as data).
-- **Live Volume run** — upload the corpus to `raw_uploads/`, parse from the
-  Volume path (prove the end-to-end untrusted-sandbox → deterministic-parse flow),
-  and stage a canonical rowset for the Spike 1 commit path.
-- **Image path** — vision-FM-in-endpoint vs `ai_parse_document`-in-Job; measure
-  latency + payload + per-modality accuracy (route via `databricks-ai-functions`).
-- **Broaden corpus** — larger messy set + adversarial-content (injection strings
-  in text cells) to exercise the typed boundary.
+- **Zip-bomb / XML-entity expansion**: the definitive defense is a
+  **resource-bounded Job** (red-team C-16) — in-process caps here are necessary
+  not sufficient. Move heavy/bulk parse to a Job.
+- **Merged-cell headers**, two-tables-on-one-sheet, mid-file repeated headers.
+- **Typed agent boundary**: confirm free-text values are excluded from the
+  agent's decision context (neutralization here is export-safety only).
+- **Image path** — vision-FM-in-endpoint vs `ai_parse_document`-in-Job (probabilistic,
+  confidence-gated + human-confirm).
+- **Config-driven date format** for text/CSV dates (like the numeric locale).
