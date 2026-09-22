@@ -1,0 +1,7 @@
+# fastapi + uvicorn are pre-installed in the Databricks Apps runtime, but pinning is harmless.
+fastapi
+uvicorn
+# psycopg (v3) is NOT pre-installed -- required or the app crashes on first Lakebase connect.
+psycopg[binary]
+# databricks-sdk: ensure a recent version for the Lakebase credential API.
+databricks-sdk>=0.40.0

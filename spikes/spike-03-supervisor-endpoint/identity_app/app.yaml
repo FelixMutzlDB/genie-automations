@@ -1,0 +1,20 @@
+command:
+  - uvicorn
+  - app:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  # Lakebase coordinates for the genie-automations autoscale project (fevm-felix-demo).
+  - name: LAKEBASE_HOST
+    value: "ep-fragrant-lake-d7lhfygl.database.eu-central-1.cloud.databricks.com"
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/genie-automations/branches/production/endpoints/primary"
+  - name: LAKEBASE_INSTANCE
+    value: "genie-automations"
+  # Optional: uncomment once a Lakebase `database` resource is attached to the app,
+  # which auto-injects PGHOST/PGDATABASE/PGUSER/PGPASSWORD for the SP (L1) baseline leg.
+  # - name: PGDATABASE
+  #   value: "databricks_postgres"
