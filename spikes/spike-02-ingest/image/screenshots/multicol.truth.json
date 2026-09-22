@@ -1,0 +1,24 @@
+{
+  "file": "multicol.png",
+  "rows": [
+    {
+      "remittance_id": "RMT-1001",
+      "invoice_id": "INV-88012",
+      "amount": "1334.56",
+      "pay_date": "2026-02-03"
+    },
+    {
+      "remittance_id": "RMT-1001",
+      "invoice_id": "INV-88044",
+      "amount": "902.10",
+      "pay_date": "2026-02-03"
+    },
+    {
+      "remittance_id": "RMT-1002",
+      "invoice_id": "INV-90233",
+      "amount": "12500.00",
+      "pay_date": "2026-02-04"
+    }
+  ],
+  "stated_total": "14736.66"
+}
