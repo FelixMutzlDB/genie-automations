@@ -32,22 +32,56 @@ export function sha256(raw: Buffer): string {
 
 export function validCsvBytes(raw: Buffer): boolean {
   if (raw.includes(0)) return false;
+  let text: string;
   try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-    if (!text.trim()) return false;
-    let controls = 0;
-    for (const character of text) {
-      const code = character.charCodeAt(0);
-      if (code < 32 && code !== 9 && code !== 10 && code !== 13) controls += 1;
-    }
-    return controls / text.length < 0.01;
+    text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
   } catch {
-    // The unchanged parser also supports cp1252. Reject bytes that are clearly
-    // binary while allowing that declared text fallback.
-    let controls = 0;
-    for (const byte of raw) if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) controls += 1;
-    return controls / raw.length < 0.01;
+    try {
+      text = new TextDecoder('windows-1252', { fatal: true }).decode(raw);
+    } catch {
+      return false;
+    }
   }
+  if (!text.trim()) return false;
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    const forbiddenControl = (code < 32 && code !== 9 && code !== 10 && code !== 13) || (code >= 127 && code <= 159);
+    if (forbiddenControl || code === 0xfffd) return false;
+  }
+
+  const delimiters = [',', ';', '\t', '|'];
+  return delimiters.some((delimiter) => {
+    const widths = csvRecordWidths(text, delimiter);
+    return widths !== null && widths.length >= 2 && widths[0] >= 2 && widths.every((width) => width === widths[0]);
+  });
+}
+
+function csvRecordWidths(text: string, delimiter: string): number[] | null {
+  const widths: number[] = [];
+  let fields = 1;
+  let inQuotes = false;
+  let recordHasContent = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      if (inQuotes && text[index + 1] === '"') index += 1;
+      else inQuotes = !inQuotes;
+      recordHasContent = true;
+    } else if (!inQuotes && character === delimiter) {
+      fields += 1;
+      recordHasContent = true;
+    } else if (!inQuotes && (character === '\n' || character === '\r')) {
+      if (recordHasContent) widths.push(fields);
+      fields = 1;
+      recordHasContent = false;
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
+    } else if (!/\s/u.test(character)) {
+      recordHasContent = true;
+    }
+  }
+  if (inQuotes) return null;
+  if (recordHasContent) widths.push(fields);
+  return widths;
 }
 
 export function isAlreadyExists(error: unknown): boolean {

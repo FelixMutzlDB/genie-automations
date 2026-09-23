@@ -56,6 +56,20 @@ export interface ActiveIngest {
   parseId?: string;
 }
 
+export interface CloseIngestActions {
+  closeDialog(): void;
+  resetState(): void;
+  clearPreview(): void;
+}
+
+export function closeIngestSession(active: ActiveIngest | null, actions: CloseIngestActions): null {
+  active?.controller.abort();
+  actions.closeDialog();
+  actions.resetState();
+  actions.clearPreview();
+  return null;
+}
+
 export function isCurrentIngest(
   active: ActiveIngest | null,
   controller: AbortController,

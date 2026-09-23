@@ -25,8 +25,11 @@ describe('ingest upload identity', () => {
 
   it('rejects binary CSV content while allowing UTF-8 and cp1252 text', () => {
     expect(validCsvBytes(Buffer.from('name,amount\nCafé,10\n', 'utf8'))).toBe(true);
-    expect(validCsvBytes(Buffer.from([0x6e, 0x61, 0x6d, 0x65, 0x0a, 0x80, 0x2c, 0x31]))).toBe(true);
+    expect(validCsvBytes(Buffer.from([0x6e, 0x61, 0x6d, 0x65, 0x2c, 0x61, 0x6d, 0x6f, 0x75, 0x6e, 0x74, 0x0a, 0x63, 0x61, 0x66, 0xe9, 0x2c, 0x31, 0x30]))).toBe(true);
     expect(validCsvBytes(Buffer.from([0x00, 0x01, 0x02, 0x03]))).toBe(false);
+    expect(validCsvBytes(Buffer.alloc(512, 0x89))).toBe(false);
+    expect(validCsvBytes(Buffer.from('not a delimited file\nstill not delimited'))).toBe(false);
+    expect(validCsvBytes(Buffer.from('a,b\n1\n'))).toBe(false);
   });
 
   it('recognizes immutable-upload conflicts only', () => {

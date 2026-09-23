@@ -49,6 +49,7 @@ import { TaskContext } from './TaskContext';
 import { humanizeActor, summarizeChange } from './lib/humanize';
 import {
   abortableDelay,
+  closeIngestSession,
   humanizeIngestReject,
   isCurrentIngest,
   reduceIngest,
@@ -246,28 +247,32 @@ export default function App() {
     [messagesByTask, selectedTaskId]
   );
 
+  const closeIngest = useCallback(() => {
+    ingestRequestRef.current = closeIngestSession(ingestRequestRef.current, {
+      closeDialog: () => setIngestOpen(false),
+      resetState: () => setIngestState({ phase: 'idle' }),
+      clearPreview: () => setPreview(null),
+    });
+  }, []);
+
   const abortTaskRequests = useCallback(() => {
     chatControllerRef.current?.abort();
     chatControllerRef.current = null;
     for (const controller of actionControllersRef.current) controller.abort();
     actionControllersRef.current.clear();
-    ingestRequestRef.current?.controller.abort();
-    ingestRequestRef.current = null;
   }, []);
 
   const selectTask = useCallback(
     (taskId: string) => {
       abortTaskRequests();
+      closeIngest();
       selectedTaskIdRef.current = taskId;
       setSelectedTaskId(taskId);
       setBusy(false);
-      setIngestOpen(false);
-      setIngestState({ phase: 'idle' });
-      setPreview(null);
       localStorage.setItem(STORAGE_KEY, taskId);
       setPageError(null);
     },
-    [abortTaskRequests]
+    [abortTaskRequests, closeIngest]
   );
 
   const loadTasks = useCallback(
@@ -284,6 +289,7 @@ export default function App() {
         else if (memberTasks[0]) selectTask(memberTasks[0].task_id);
         else {
           abortTaskRequests();
+          closeIngest();
           selectedTaskIdRef.current = null;
           setSelectedTaskId(null);
           setBusy(false);
@@ -294,7 +300,7 @@ export default function App() {
         setTasksLoading(false);
       }
     },
-    [abortTaskRequests, selectTask, selectedTaskId]
+    [abortTaskRequests, closeIngest, selectTask, selectedTaskId]
   );
 
   const refreshTaskViews = useCallback(async (taskId: string, signal?: AbortSignal) => {
@@ -319,7 +325,11 @@ export default function App() {
   useEffect(() => {
     void loadTasks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => () => abortTaskRequests(), [abortTaskRequests]);
+  useEffect(() => () => {
+    abortTaskRequests();
+    ingestRequestRef.current?.controller.abort();
+    ingestRequestRef.current = null;
+  }, [abortTaskRequests]);
   useEffect(() => {
     if (selectedTaskId) {
       const controller = new AbortController();
@@ -942,13 +952,8 @@ export default function App() {
           <Dialog
             open={ingestOpen}
             onOpenChange={(open) => {
-              setIngestOpen(open);
-              if (!open) {
-                ingestRequestRef.current?.controller.abort();
-                ingestRequestRef.current = null;
-                setIngestState({ phase: 'idle' });
-                setPreview(null);
-              }
+              if (open) setIngestOpen(true);
+              else closeIngest();
             }}
           >
             <DialogContent className="max-w-4xl max-h-[85vh] overflow-auto">
@@ -991,7 +996,7 @@ export default function App() {
                   )}
                 </div>
               )}
-              <DialogFooter><Button variant="outline" onClick={() => setIngestOpen(false)}>Close</Button></DialogFooter>
+              <DialogFooter><Button variant="outline" onClick={closeIngest}>Close</Button></DialogFooter>
             </DialogContent>
           </Dialog>
         </div>

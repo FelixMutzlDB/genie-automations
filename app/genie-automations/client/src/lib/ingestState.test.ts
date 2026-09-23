@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { abortableDelay, humanizeIngestReject, isCurrentIngest, reduceIngest, type IngestUiState } from './ingestState';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  abortableDelay,
+  closeIngestSession,
+  humanizeIngestReject,
+  isCurrentIngest,
+  reduceIngest,
+  type IngestUiState,
+} from './ingestState';
 
 describe('ingest preview state machine', () => {
   it('moves from upload through async parsing to preview', () => {
@@ -32,6 +39,25 @@ describe('ingest preview state machine', () => {
     controller.abort();
     await expect(abortableDelay(10_000, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
   });
+
+  it.each(['Close button', 'backdrop or Escape', 'programmatic task close'])(
+    'aborts polling and clears state through the shared close session for %s',
+    () => {
+      const controller = new AbortController();
+      const closeDialog = vi.fn();
+      const resetState = vi.fn();
+      const clearPreview = vi.fn();
+      const current = closeIngestSession(
+        { controller, taskId: 'task-a', parseId: 'parse-a' },
+        { closeDialog, resetState, clearPreview }
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expect(current).toBeNull();
+      expect(closeDialog).toHaveBeenCalledOnce();
+      expect(resetState).toHaveBeenCalledOnce();
+      expect(clearPreview).toHaveBeenCalledOnce();
+    }
+  );
 
   it('humanizes known and unknown parser codes without exposing the code', () => {
     const known = humanizeIngestReject('IG016');
