@@ -2,7 +2,7 @@ command: ['npm', 'run', 'start']
 env:
   - name: LAKEBASE_ENDPOINT
     valueFrom: postgres
-  - name: DATABRICKS_VOLUME_UPLOADS
-    valueFrom: uploads-volume
-  - name: DATABRICKS_JOB_PARSE
-    valueFrom: parse-job
+  - name: DATABRICKS_VOLUME_FILES
+    valueFrom: files
+  - name: DATABRICKS_JOB_ID
+    valueFrom: job

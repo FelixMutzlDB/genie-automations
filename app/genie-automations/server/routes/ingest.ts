@@ -202,10 +202,10 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const relativePath = uploadPath(req.params.taskId, digest, extension);
         const parseId = newParseId();
         const artifactPath = `${req.params.taskId}/${digest}/${parseId}.preview.json`;
-        const volumeRoot = process.env['DATABRICKS_VOLUME_UPLOADS'];
-        if (!volumeRoot) throw new Error('uploads volume is not configured');
+        const volumeRoot = process.env['DATABRICKS_VOLUME_FILES'];
+        if (!volumeRoot) throw new Error('files volume is not configured');
 
-        const userFiles = appkit.files('uploads').asUser(req);
+        const userFiles = appkit.files('files').asUser(req);
         if (!(await userFiles.exists(relativePath))) {
           try {
             await userFiles.upload(relativePath, req.body, { overwrite: false });
@@ -223,7 +223,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           [parseId, req.params.taskId, actor, relativePath, digest, PARSER_VERSION, CONFIG_VERSION, artifactPath]
         );
 
-        const run = await appkit.jobs('parse').runNow({
+        const run = await appkit.jobs('default').runNow({
           args: [
             '--input',
             `${volumeRoot.replace(/\/$/, '')}/${relativePath}`,
@@ -264,11 +264,11 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const row = record.rows[0];
         if (!row) return friendlyFailure(res, 403, 'You cannot view this parse run.');
         const runId = Number(row['run_id']);
-        const run = await appkit.jobs('parse').getRun(runId);
+        const run = await appkit.jobs('default').getRun(runId);
         if (!run.ok || !run.data) throw new Error('parse status unavailable');
         const status = parseRunStatus(run.data);
         if (status === 'succeeded') {
-          const output = await appkit.jobs('parse').getRunOutput(runId);
+          const output = await appkit.jobs('default').getRunOutput(runId);
           if (!output.ok) throw new Error('parse output unavailable');
         }
         await db.query(`UPDATE ${SCHEMA}.ingest_run SET status=$2, updated_at=now() WHERE parse_id=$1`, [
@@ -301,7 +301,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const artifact = record.rows[0]?.['artifact_ref'];
         if (typeof artifact !== 'string') return friendlyFailure(res, 403, 'You cannot view this preview.');
         const body = await appkit
-          .files('uploads')
+          .files('files')
           .asUser(req)
           .read(artifact, { maxSize: 10 * 1024 * 1024 });
         res.json(JSON.parse(body));
@@ -391,7 +391,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const configVersion = runRow?.['config_version'];
         if (typeof artifactRef !== 'string' || typeof configVersion !== 'string') throw new Error('invalid ingest run');
         const artifactRaw = await appkit
-          .files('uploads')
+          .files('files')
           .asUser(req)
           .read(artifactRef, { maxSize: 10 * 1024 * 1024 });
         const artifact = canonicalArtifact(artifactRaw, body.parse_id, configVersion);
