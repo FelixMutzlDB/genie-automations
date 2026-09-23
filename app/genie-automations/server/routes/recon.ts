@@ -44,19 +44,6 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-const FRIENDLY_COMPLETION_ERROR = "I couldn't complete that — could you rephrase?";
-export const GENERIC_SERVER_ERROR = 'Something went wrong — nothing was changed. Please try again.';
-
-export function clientSafeError(error: unknown): string {
-  console.error('Request failed:', error);
-  return GENERIC_SERVER_ERROR;
-}
-
-export function clientSafeSqlstate(code: unknown): string {
-  if (typeof code !== 'string') return 'error';
-  return /^GA\d{3}$/.test(code) || /^[0-9A-Z]{5}$/.test(code) ? code : 'error';
-}
-
 // ── Tool implementations (all OBO, all read-only except stage_* which stages a
 //    PROPOSAL via the guarded stage_change proc — never a direct write) ────────
 function listTasks(): unknown {
@@ -464,9 +451,9 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
           action: 'chat',
           status: 'failure',
           proposalId: proposalIdFromEvents(events, taskId),
-          detail: { error: safeError },
+          detail: { error: (err as Error).message },
         });
-        res.status(500).json({ identity: actor, error: safeError, tool_events: events });
+        res.status(500).json({ identity: actor, error: (err as Error).message, tool_events: events });
       }
     });
 
@@ -498,16 +485,15 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         res.json({ ok: true, result: r.rows[0]?.['result'] });
       } catch (err) {
         const pe = err as { code?: string; message?: string };
-        const safeError = clientSafeError(err);
         await tryRecordTaskActivity(d, {
           taskId,
           userId: actor,
           action: 'approve',
           status: 'failure',
           proposalId: id,
-          detail: { sqlstate: clientSafeSqlstate(pe.code), error: safeError },
+          detail: { sqlstate: pe.code ?? 'error', error: pe.message ?? String(err) },
         });
-        res.json({ ok: false, sqlstate: clientSafeSqlstate(pe.code), error: safeError });
+        res.json({ ok: false, sqlstate: pe.code ?? 'error', error: pe.message ?? String(err) });
       }
     });
 
@@ -544,16 +530,15 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         res.json({ ok: true, result, audit: audit.rows[0] ?? null });
       } catch (err) {
         const pe = err as { code?: string; message?: string };
-        const safeError = clientSafeError(err);
         await tryRecordTaskActivity(d, {
           taskId,
           userId: actor,
           action: 'commit',
           status: 'failure',
           proposalId: id,
-          detail: { sqlstate: clientSafeSqlstate(pe.code), error: safeError },
+          detail: { sqlstate: pe.code ?? 'error', error: pe.message ?? String(err) },
         });
-        res.json({ ok: false, sqlstate: clientSafeSqlstate(pe.code), error: safeError });
+        res.json({ ok: false, sqlstate: pe.code ?? 'error', error: pe.message ?? String(err) });
       }
     });
   });
