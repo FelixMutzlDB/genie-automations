@@ -51,3 +51,15 @@ execution identity per automation-type, owners may go unilateral on the residual
 > gate (i) + a correct parser (iii-silent-bugs, already closed). Do not ship a
 > real-user pilot before (i) closes — the spike's caller-can-self-approve
 > shortcut makes the current green run look safer than a real pilot would be.
+
+## D5 — Frontend framework (ADR-006): **Option A — AppKit/DuBois, port thin backend to Node** ✅
+The productionized UI adopts **AppKit** (`@databricks/appkit` / `-ui`) so it inherits
+the native Databricks Genie / DuBois look-and-feel (incl. `GenieChat`/`useGenieChat`)
+rather than hand-theming the spike CSS. Because AppKit is a **full-stack Node/TypeScript**
+framework (single-command Databricks App), this means the thin backend
+(forwarded-token → Lakebase mint → `pg` → agent loop → FM) is **ported to the AppKit
+Node server**; the **guarded Postgres procs — the sole mutation boundary — are SQL and
+do NOT change**. Felix accepted the re-proof cost. **Gate before retiring Python:**
+re-prove `session_user = human` (L0 OBO) from a Node server (Node analogue of the
+`spike-03/identity_app` test). *Decision locked now (Arc 1); build at the Arc-2
+boundary; polish Arc 3.* See `11-ui-ux-spec.md` + `12-design-tokens.md`.

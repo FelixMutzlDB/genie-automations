@@ -14,12 +14,14 @@
 
 ---
 
-## ADR-006 — Frontend framework: adopt AppKit / DuBois for the production UI  *(Proposed — gated)*
+## ADR-006 — Frontend framework: adopt AppKit / DuBois for the production UI  *(Accepted — Option A, gated on Node-OBO re-proof)*
 
-**Status:** Proposed, **gated** on the OBO-in-Node validation below. Do **not** lock
-until that micro-test passes and Felix picks the resolution. (Consistent with both
-partners: "decide the direction now on the plan — cheap; scaffold at the Arc-2
-boundary; lock the ADR only after verifying.")
+**Status:** **Accepted — Option A** (Felix ratified 2026-09-23): productionize on
+AppKit/DuBois with the thin backend ported to the AppKit **Node** server; the guarded
+Postgres procs (SQL) are unchanged. **Remaining gate:** re-prove `session_user =
+human` (L0 OBO) from a Node server before retiring the Python app — the Node analogue
+of the `spike-03/identity_app` test that returned `L0_full_obo` in Python. Build lands
+at the Arc-2 boundary; the decision is locked now (Arc 1).
 
 **Decision (direction):** The productionized UI consumes the Databricks Design
 System via **AppKit** (`@databricks/appkit` / `@databricks/appkit-ui`) — the same
