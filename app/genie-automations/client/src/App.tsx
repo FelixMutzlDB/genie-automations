@@ -47,6 +47,7 @@ import {
 import { Bot, Plus, Send, ShieldCheck, User, Wrench } from 'lucide-react';
 import { TaskContext } from './TaskContext';
 import { humanizeActor, summarizeChange } from './lib/humanize';
+import { reduceIngest, type IngestUiState } from './lib/ingestState';
 
 interface ToolEvent {
   tool: string;
@@ -67,11 +68,20 @@ interface Task {
   name: string;
   task_type: string;
   ingest_enabled: boolean;
+  target_catalog: string | null;
   target_schema: string | null;
   target_table: string | null;
   org_id: string;
   role: 'owner' | 'member' | null;
   member_count: number;
+}
+interface ParsePreview {
+  parse_id: string;
+  sha256: string;
+  status: 'ready' | 'rejected';
+  rows: Array<{ values: Record<string, string | null>; source_row: number }>;
+  rejected_rows: Array<{ code: string; guidance: string; source_row: number | null }>;
+  warnings: string[];
 }
 interface Activity {
   user_id: string;
@@ -204,11 +214,16 @@ export default function App() {
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState('allocation_upsert');
   const [ingestEnabled, setIngestEnabled] = useState(false);
+  const [targetCatalog, setTargetCatalog] = useState('');
   const [targetSchema, setTargetSchema] = useState('');
   const [targetTable, setTargetTable] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [ingestOpen, setIngestOpen] = useState(false);
+  const [ingestState, setIngestState] = useState<IngestUiState>({ phase: 'idle' });
+  const [preview, setPreview] = useState<ParsePreview | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const chatControllerRef = useRef<AbortController | null>(null);
@@ -339,8 +354,8 @@ export default function App() {
       setCreateError('Give this automation a name.');
       return;
     }
-    if (ingestEnabled && (!targetSchema.trim() || !targetTable.trim())) {
-      setCreateError('Add both a target schema and table.');
+    if (ingestEnabled && (!targetCatalog.trim() || !targetSchema.trim() || !targetTable.trim())) {
+      setCreateError('Add a target catalog, schema, and table.');
       return;
     }
     setCreating(true);
@@ -353,6 +368,7 @@ export default function App() {
           name: createName.trim(),
           task_type: createType,
           ingest_enabled: ingestEnabled,
+          target_catalog: ingestEnabled ? targetCatalog.trim() : null,
           target_schema: ingestEnabled ? targetSchema.trim() : null,
           target_table: ingestEnabled ? targetTable.trim() : null,
         }),
@@ -362,6 +378,7 @@ export default function App() {
       setCreateOpen(false);
       setCreateName('');
       setIngestEnabled(false);
+      setTargetCatalog('');
       setTargetSchema('');
       setTargetTable('');
       await loadTasks(task.task_id);
@@ -371,7 +388,53 @@ export default function App() {
     } finally {
       setCreating(false);
     }
-  }, [createName, createType, ingestEnabled, loadTasks, targetSchema, targetTable]);
+  }, [createName, createType, ingestEnabled, loadTasks, targetCatalog, targetSchema, targetTable]);
+
+  const canIngest = Boolean(
+    selectedTask?.ingest_enabled && selectedTask.target_catalog && selectedTask.target_schema && selectedTask.target_table
+  );
+
+  const uploadForPreview = useCallback(async (file: File) => {
+    if (!selectedTask || !canIngest) return;
+    setPreview(null);
+    setIngestState((state) => reduceIngest(state, { type: 'START' }));
+    try {
+      const upload = await fetch(`/api/ingest/${encodeURIComponent(selectedTask.task_id)}/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'x-upload-filename': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const accepted = (await upload.json()) as { parse_id?: string; run_id?: number; error?: string };
+      if (!upload.ok || !accepted.parse_id || typeof accepted.run_id !== 'number') {
+        throw new Error(accepted.error ?? 'We could not upload that file.');
+      }
+      setIngestState((state) => reduceIngest(state, { type: 'ACCEPTED', parseId: accepted.parse_id!, runId: accepted.run_id! }));
+
+      const started = Date.now();
+      while (Date.now() - started < 120_000) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const poll = await fetch(`/api/ingest/${encodeURIComponent(accepted.parse_id)}/poll`);
+        const status = (await poll.json()) as { status?: string; error?: string };
+        if (!poll.ok || !status.status) throw new Error(status.error ?? 'We could not check the parser.');
+        setIngestState((state) => reduceIngest(state, { type: 'POLL', status: status.status! }));
+        if (status.status === 'TERMINATED') {
+          const result = await fetch(`/api/ingest/${encodeURIComponent(accepted.parse_id)}/preview`);
+          const parsed = (await result.json()) as ParsePreview & { error?: string };
+          if (!result.ok) throw new Error(parsed.error ?? 'The preview is not ready.');
+          setPreview(parsed);
+          setIngestState((state) => reduceIngest(state, { type: 'PREVIEW_READY' }));
+          return;
+        }
+        if (['INTERNAL_ERROR', 'SKIPPED', 'TERMINATING'].includes(status.status)) {
+          throw new Error('The parser could not finish safely.');
+        }
+      }
+      throw new Error('Parsing is taking longer than expected. You can close this window and try again.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'We could not create a preview.';
+      setIngestState((state) => reduceIngest(state, { type: 'FAIL', message }));
+    }
+  }, [canIngest, selectedTask]);
 
   const send = useCallback(
     async (text: string) => {
@@ -604,7 +667,24 @@ export default function App() {
                   ))}
                 </div>
                 <div className="border-t p-3 flex gap-2">
-                  <Button variant="outline" size="icon" disabled title="File upload is coming soon">
+                  <input
+                    ref={fileInputRef}
+                    className="hidden"
+                    type="file"
+                    accept=".csv,.xlsx"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) { setIngestOpen(true); void uploadForPreview(file); }
+                      event.target.value = '';
+                    }}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    disabled={!canIngest}
+                    title={canIngest ? 'Upload CSV or Excel for a safe preview' : 'Enable ingest and bind a catalog, schema, and table first'}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
                     <Plus className="h-4 w-4" />
                   </Button>
                   <Input
@@ -782,7 +862,15 @@ export default function App() {
                   <Switch id="ingest-enabled" checked={ingestEnabled} onCheckedChange={setIngestEnabled} />
                 </div>
                 {ingestEnabled && (
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="target-catalog">Target catalog</Label>
+                      <Input
+                        id="target-catalog"
+                        value={targetCatalog}
+                        onChange={(event) => setTargetCatalog(event.target.value)}
+                      />
+                    </div>
                     <div className="space-y-2">
                       <Label htmlFor="target-schema">Target schema</Label>
                       <Input
@@ -815,6 +903,49 @@ export default function App() {
                   {creating ? 'Creating…' : 'Create automation'}
                 </Button>
               </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={ingestOpen} onOpenChange={setIngestOpen}>
+            <DialogContent className="max-w-4xl max-h-[85vh] overflow-auto">
+              <DialogHeader>
+                <DialogTitle>File parse preview</DialogTitle>
+                <DialogDescription>This preview cannot apply, stage, or approve financial changes.</DialogDescription>
+              </DialogHeader>
+              {ingestState.phase === 'uploading' && <p>Uploading the original bytes and checking their fingerprint…</p>}
+              {ingestState.phase === 'parsing' && <p>Parsing safely in a separate job…</p>}
+              {ingestState.phase === 'error' && (
+                <Alert variant="destructive"><AlertDescription>{ingestState.message}</AlertDescription></Alert>
+              )}
+              {ingestState.phase === 'preview' && preview && (
+                <div className="space-y-4">
+                  <p className="text-xs text-muted-foreground break-all">SHA-256: {preview.sha256}</p>
+                  {preview.warnings.map((warning) => <Alert key={warning}><AlertDescription>{warning}</AlertDescription></Alert>)}
+                  {preview.rejected_rows.map((rejected) => (
+                    <Alert key={`${rejected.code}-${rejected.source_row}`} variant="destructive">
+                      <AlertDescription>
+                        {rejected.code}: {rejected.guidance}{rejected.source_row ? ` (source row ${rejected.source_row})` : ''}
+                      </AlertDescription>
+                    </Alert>
+                  ))}
+                  {preview.rows.length === 0 ? (
+                    <Empty><EmptyHeader><EmptyTitle>No accepted rows</EmptyTitle></EmptyHeader><EmptyDescription>Review the guidance above.</EmptyDescription></Empty>
+                  ) : (
+                    <div className="overflow-auto rounded-md border">
+                      <table className="w-full text-sm">
+                        <thead><tr className="border-b bg-muted">
+                          <th className="p-2 text-left">Source row</th>
+                          {Object.keys(preview.rows[0]?.values ?? {}).map((column) => <th key={column} className="p-2 text-left">{column.replaceAll('_', ' ')}</th>)}
+                        </tr></thead>
+                        <tbody>{preview.rows.map((row) => <tr key={row.source_row} className="border-b">
+                          <td className="p-2">{row.source_row}</td>
+                          {Object.keys(preview.rows[0]?.values ?? {}).map((column) => <td key={column} className="p-2">{row.values[column] ?? '—'}</td>)}
+                        </tr>)}</tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+              <DialogFooter><Button variant="outline" onClick={() => setIngestOpen(false)}>Close</Button></DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
