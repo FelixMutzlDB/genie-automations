@@ -1,6 +1,6 @@
 import { Application, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import { setupReconRoutes } from './recon';
+import { clientSafeError, clientSafeSqlstate, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
 import { setupTaskRoutes } from './tasks';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
