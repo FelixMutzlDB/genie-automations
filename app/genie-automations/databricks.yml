@@ -1,0 +1,46 @@
+bundle:
+  name: genie-automations
+
+variables:
+  postgres_branch:
+    description: Full Lakebase Postgres branch resource name. Obtain by running `databricks postgres list-branches {project-name}`, select the desired item from the output array and use its .name value. Requires the project resource name.
+  postgres_database:
+    description: Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.
+  postgres_project:
+    description: Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.
+
+resources:
+  apps:
+    app:
+      name: "genie-automations"
+      description: "Genie-automations reconciliation co-worker (AppKit/DuBois, OBO)"
+      source_code_path: ./
+
+      # Start the app automatically on deploy.
+      lifecycle:
+        started: true
+      # OBO: run Lakebase queries AS THE CALLING USER (session_user = the human).
+      # This is the ADR-006 Option A gate. 'postgres' = per-user Lakebase pool;
+      # 'serving.serving-endpoints' lets the agent call the FM.
+      user_api_scopes:
+        - postgres
+        - serving.serving-endpoints
+
+      # The resources which this app has access to.
+      resources:
+        - name: postgres
+          postgres:
+            branch: ${var.postgres_branch}
+            database: ${var.postgres_database}
+            permission: CAN_CONNECT_AND_CREATE
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://fevm-felix-demo.cloud.databricks.com
+
+    variables:
+      postgres_branch: projects/genie-automations/branches/production
+      postgres_database: projects/genie-automations/branches/production/databases/databricks-postgres
+      postgres_project: projects/genie-automations
