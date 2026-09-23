@@ -9,14 +9,14 @@ createApp({
     lakebase(),
     files({
       volumes: {
-        uploads: {
+        files: {
           auth: 'on-behalf-of-user',
           maxUploadSize: 25 * 1024 * 1024,
           policy: files.policy.allowAll(),
         },
       },
     }),
-    jobs({ jobs: { parse: { taskType: 'python_script' } } }),
+    jobs({ jobs: { default: { taskType: 'python_script' } } }),
     server(),
   ],
   onPluginsReady(appkit) {

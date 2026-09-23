@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS genie_spike.ingest_run (
 -- Request-user roles receive no direct ingest_run privileges. The application
 -- identity owns immutable paths/digests/artifact references; it may update only
 -- Job lifecycle fields after insertion.
+GRANT USAGE ON SCHEMA genie_spike TO :"ingest_app_role";
 REVOKE ALL ON genie_spike.ingest_run FROM PUBLIC;
 GRANT SELECT ON genie_spike.ingest_run TO :"ingest_app_role";
 GRANT INSERT (

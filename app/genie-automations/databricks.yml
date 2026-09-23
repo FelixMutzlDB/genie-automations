@@ -37,12 +37,12 @@ resources:
             branch: ${var.postgres_branch}
             database: ${var.postgres_database}
             permission: CAN_CONNECT_AND_CREATE
-        - name: uploads-volume
+        - name: files
           uc_securable:
             securable_type: VOLUME
             securable_full_name: ${var.uploads_volume_full_name}
             permission: WRITE_VOLUME
-        - name: parse-job
+        - name: job
           job:
             id: ${resources.jobs.parse_preview.id}
             permission: CAN_MANAGE_RUN

@@ -73,7 +73,7 @@ function request(email: string | null = 'alice@example.com'): Request {
 
 describe('ingest upload route', () => {
   it('uses a generated relative path and starts the mocked parse job', async () => {
-    process.env['DATABRICKS_VOLUME_UPLOADS'] = '/Volumes/c/s/v';
+    process.env['DATABRICKS_VOLUME_FILES'] = '/Volumes/c/s/v';
     const gate = { is_member: true, ingest_enabled: true, target_catalog: 'c', target_schema: 's', target_table: 't' };
     const { handlers, upload, runNow } = harness(gate);
     const { res, state } = response();
