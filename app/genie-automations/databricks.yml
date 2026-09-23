@@ -38,8 +38,9 @@ resources:
             database: ${var.postgres_database}
             permission: CAN_CONNECT_AND_CREATE
         - name: uploads-volume
-          volume:
-            path: ${var.uploads_volume}
+          uc_securable:
+            securable_type: VOLUME
+            securable_full_name: ${var.uploads_volume}
             permission: WRITE_VOLUME
         - name: parse-job
           job:
