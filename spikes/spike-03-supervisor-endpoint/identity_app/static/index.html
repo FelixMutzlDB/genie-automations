@@ -76,6 +76,7 @@
 const SID = "s-" + Math.random().toString(36).slice(2,9);
 const $ = s => document.querySelector(s);
 const transcript = $("#transcript"), events = $("#events"), proposals = $("#proposals");
+const outcomes = {};  // proposal_id -> {cls, html} — persisted so a re-render doesn't wipe the last result
 
 function esc(s){return (s??"").toString().replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function addMsg(role, text){
@@ -109,6 +110,8 @@ function renderProposals(props){
         <button class="warn" ${canCommit?"":"disabled"}  data-act="commit"  data-id="${esc(p.proposal_id)}">Commit</button>
       </div><div class="outcome" style="display:none"></div>`;
     proposals.appendChild(d);
+    const oc=outcomes[p.proposal_id];
+    if(oc){const out=d.querySelector(".outcome");out.style.display="block";out.className="outcome "+oc.cls;out.innerHTML=oc.html;}
   }
 }
 async function post(url, body){
@@ -131,20 +134,27 @@ proposals.addEventListener("click", async ev=>{
   const act=b.dataset.act, id=b.dataset.id, card=b.closest(".prop"), out=card.querySelector(".outcome");
   b.disabled=true; out.style.display="block"; out.className="outcome"; out.textContent="…";
   const {status,data}=await post("/"+act,{proposal_id:id});
-  if(status===401){out.className="outcome bad";out.textContent="⛔ "+(data.detail||"fail-closed");b.disabled=false;return;}
-  if(data.ok){
-    out.className="outcome ok";
+  let cls, html;
+  if(status===401){
+    cls="bad"; html="⛔ "+esc(data.detail||"fail-closed");
+  } else if(data.ok){
+    cls="ok";
     if(act==="commit" && data.audit){
-      out.innerHTML=`✅ committed. <b>audit.actor_id = ${esc(data.audit.actor_id)}</b> · db_principal = ${esc(data.audit.db_principal)}
+      html=`✅ committed. <b>audit.actor_id = ${esc(data.audit.actor_id)}</b> · db_principal = ${esc(data.audit.db_principal)}
         · commit_seq ${esc((data.result||{}).commit_seq)} · sha ${esc((data.audit.payload_sha256||"").slice(0,12))}…`;
-    } else { out.textContent="✅ "+JSON.stringify(data.result); }
+    } else { html="✅ "+esc(JSON.stringify(data.result)); }
   } else {
-    out.className="outcome bad";
-    out.innerHTML=`⛔ <b>${esc(data.sqlstate||"error")}</b> — ${esc(data.error)}
-      ${data.sqlstate==="GA003"?"<br><i>Segregation of duties: a DIFFERENT authenticated user must approve. This is the guardrail working.</i>":""}
-      ${data.sqlstate==="GA005"?"<br><i>Over-allocation invariant: the sum would exceed the remittance total. Nothing was written.</i>":""}`;
+    cls="bad";
+    html=`⛔ <b>${esc(data.sqlstate||"error")}</b> — ${esc(data.error)}`
+      + (data.sqlstate==="GA003"?"<br><i>Segregation of duties: a DIFFERENT authenticated user must approve. This is the guardrail working.</i>":"")
+      + (data.sqlstate==="GA005"?"<br><i>Over-allocation invariant: the sum would exceed the remittance total. Nothing was written.</i>":"")
+      + (data.sqlstate==="GA004"?"<br><i>Stale version: the ledger changed since this was staged. Re-stage to pick up the current version.</i>":"");
   }
-  // refresh proposal states
+  // persist the outcome so the refresh below (or any later re-render) re-paints it instead of wiping it
+  outcomes[id]={cls, html};
+  // paint immediately in the current card (survives even if the refresh fails)
+  out.className="outcome "+cls; out.innerHTML=html;
+  // refresh proposal states — renderProposals restores the stored outcome, so it no longer vanishes
   const pr=await fetch("/proposals"); const pd=await pr.json().catch(()=>({}));
   if(pd.proposals) renderProposals(pd.proposals);
 });
