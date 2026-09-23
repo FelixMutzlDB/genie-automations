@@ -8,6 +8,9 @@ variables:
     description: Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.
   postgres_project:
     description: Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.
+  uploads_volume:
+    description: Existing managed Unity Catalog Volume used for immutable uploads and parse previews.
+    default: /Volumes/felix_demo_catalog/genie-automations/raw_uploads
 
 resources:
   apps:
@@ -25,6 +28,7 @@ resources:
       user_api_scopes:
         - postgres
         - serving.serving-endpoints
+        - files.files
 
       # The resources which this app has access to.
       resources:
@@ -33,6 +37,29 @@ resources:
             branch: ${var.postgres_branch}
             database: ${var.postgres_database}
             permission: CAN_CONNECT_AND_CREATE
+        - name: uploads-volume
+          volume:
+            path: ${var.uploads_volume}
+            permission: WRITE_VOLUME
+        - name: parse-job
+          job:
+            id: ${resources.jobs.parse_preview.id}
+            permission: CAN_MANAGE_RUN
+
+  jobs:
+    parse_preview:
+      name: "[${bundle.target}] genie-automations-parse-preview"
+      tasks:
+        - task_key: parse_preview
+          spark_python_task:
+            python_file: ./ingest_job/runner.py
+          environment_key: parser
+      environments:
+        - environment_key: parser
+          spec:
+            client: "4"
+            dependencies:
+              - openpyxl
 
 targets:
   default:
