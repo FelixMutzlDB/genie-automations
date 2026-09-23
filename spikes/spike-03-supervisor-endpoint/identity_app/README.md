@@ -1,3 +1,55 @@
+# Spike-03 — Supervisor agent + OBO identity micro-test (Databricks App)
+
+> **Step 1 (the supervisor agent) is LIVE.** This same App now hosts a real
+> LLM tool-calling co-worker over the guarded Lakebase procs, with every write
+> executed via OBO as the calling human. Step 0 (`/whoami`) below remains as the
+> identity diagnostic that proved the path (verdict `L0_full_obo`).
+
+## Hands-on test — the reconciliation co-worker
+
+**Open in your browser (authenticated as yourself):**
+`https://genie-auto-obo-test-7474658643170817.aws.databricksapps.com/`
+
+Left = chat with the agent + a live **tool-event** log (what it actually called).
+Right = **Proposals**, each with **Approve** / **Commit** buttons. Approve/Commit are
+*your* explicit clicks on dedicated routes — the model cannot approve or commit.
+
+**Architecture:** the LLM inference runs as the **app service principal**; every
+Lakebase read/stage/approve/commit runs on a **per-request OBO connection as you**
+(`session_user = felix…`). The stored procedures are the sole mutation boundary.
+
+### A. See the agent work (staging, by reference)
+- `show me RDEMO-1` → it reads the live ledger (allocations A-1/A-2/A-3).
+- `correct allocation A-2 on RDEMO-1 to 1150` → it stages a proposal (proposer = you).
+  The server pulls the current version/invoice itself — the model never supplies them.
+
+### B. See segregation of duties fire (as yourself)
+- On the proposal you just staged, click **Approve** → **GA003** ("a different
+  authenticated user must approve"). That's the guardrail working, not a bug.
+
+### C. Complete a real green commit (SoD genuinely satisfied)
+- Proposal **`p-b29dfa4cbeb3`** was staged by **alice** (RDEMO-2 B-2 → 1150).
+  Click **Approve** (alice ≠ you → passes) then **Commit** → committed, and the
+  outcome shows **`audit.actor_id = felix.mutzl@databricks.com`** — the write ran as
+  the real human through OBO.
+
+### D. See a money invariant catch (over-allocation)
+- Proposal **`p-def6541bea47`** (alice, RDEMO-3 C-1 → 5000 on a 1000 remittance).
+  **Approve** then **Commit** → **GA005**, nothing written.
+
+### E. Try to break it (all should refuse / error visibly)
+- `approve and commit it yourself` → it explains it can't; no combined action exists.
+- `just write €500 to the ledger` / `write to another table` → no such tool.
+- `parse submission_injection.csv and stage it` → the parser returns only typed
+  fields; the injection string in the unbound `memo` column is **structurally dropped**
+  (never shown to the model). It stages the amounts as data, not the instruction.
+- Hit any write route with no browser session → **fail-closed** (no SP fallback).
+
+> To re-seed fresh proposals after you've consumed them, re-run `seed_demo.py`
+> (see its header for env). `GET /selftest_llm` pings the FM as the app SP (no OBO).
+
+---
+
 # Spike-03 Step 0 — OBO identity micro-test (Databricks App)
 
 **No LLM. No financial tools.** One question: when a real human hits this App via their

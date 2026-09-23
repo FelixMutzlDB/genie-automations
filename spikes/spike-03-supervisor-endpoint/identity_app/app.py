@@ -30,8 +30,29 @@ import os
 import uuid
 
 from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="genie-automations OBO identity micro-test")
+import agent as agent_mod
+import dbtools
+
+app = FastAPI(title="genie-automations supervisor (spike-03)")
+
+# In-memory per-session chat history (single-node spike; fine for a hands-on test).
+_SESSIONS: dict = {}
+
+
+def _user_token(request: Request):
+    return request.headers.get("x-forwarded-access-token")
+
+
+def _fail_closed():
+    # No forwarded user token -> REFUSE. Never fall back to the app service principal.
+    return JSONResponse(status_code=401, content={
+        "error": "fail_closed_no_user_token",
+        "detail": "No forwarded user identity. This route performs identity-bound work "
+                  "and will not fall back to the app service principal. Open the app in an "
+                  "authenticated browser session."})
 
 # Lakebase coordinates (see app.yaml). LAKEBASE_HOST falls back to the injected PGHOST.
 LAKEBASE_HOST = os.environ.get("LAKEBASE_HOST") or os.environ.get("PGHOST", "")
@@ -174,3 +195,101 @@ def whoami(request: Request):
     else:
         result["verdict"] = "inconclusive"
     return result
+
+
+# ===========================================================================
+# Supervisor agent routes (spike-03 step 1). All identity-bound routes fail
+# closed on a missing forwarded token and execute Lakebase work AS THE HUMAN.
+# ===========================================================================
+@app.get("/", response_class=HTMLResponse)
+def home():
+    path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.post("/chat")
+async def chat(request: Request):
+    token = _user_token(request)
+    if not token:
+        return _fail_closed()
+    body = await request.json()
+    session_id = body.get("session_id") or "default"
+    message = (body.get("message") or "").strip()
+    if not message:
+        return JSONResponse(status_code=400, content={"error": "empty message"})
+    try:
+        identity, conn = dbtools.user_identity_and_conn(token)
+    except dbtools.NoUserToken:
+        return _fail_closed()
+    try:
+        history = _SESSIONS.get(session_id, [])
+        reply, tool_events, new_history = agent_mod.run_agent(message, history, conn)
+        _SESSIONS[session_id] = new_history
+        proposals = dbtools.list_proposals(conn)
+    finally:
+        conn.close()
+    return {"identity": identity, "reply": reply, "tool_events": tool_events,
+            "proposals": proposals}
+
+
+@app.post("/approve")
+async def approve_route(request: Request):
+    token = _user_token(request)
+    if not token:
+        return _fail_closed()
+    body = await request.json()
+    pid = body.get("proposal_id")
+    identity, conn = dbtools.user_identity_and_conn(token)
+    try:
+        res = dbtools.approve(conn, pid)
+        res["identity"] = identity
+        return res
+    finally:
+        conn.close()
+
+
+@app.post("/commit")
+async def commit_route(request: Request):
+    token = _user_token(request)
+    if not token:
+        return _fail_closed()
+    body = await request.json()
+    pid = body.get("proposal_id")
+    identity, conn = dbtools.user_identity_and_conn(token)
+    try:
+        # actor_id is the SERVER-resolved OBO identity -- never client/model supplied.
+        res = dbtools.commit(conn, pid, identity)
+        res["identity"] = identity
+        if res.get("ok"):
+            res["audit"] = dbtools.audit_for(conn, pid)
+        return res
+    finally:
+        conn.close()
+
+
+@app.get("/selftest_llm")
+def selftest_llm():
+    """No-OBO diagnostic: can the APP SERVICE PRINCIPAL reach the FM endpoint (with
+    tools)? Verifies the LLM integration without needing a forwarded user token."""
+    try:
+        client = agent_mod._openai_client()
+        resp = client.chat.completions.create(
+            model=agent_mod.MODEL,
+            messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            max_tokens=8, temperature=0)
+        return {"ok": True, "model": agent_mod.MODEL, "reply": resp.choices[0].message.content}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@app.get("/proposals")
+def proposals_route(request: Request):
+    token = _user_token(request)
+    if not token:
+        return _fail_closed()
+    identity, conn = dbtools.user_identity_and_conn(token)
+    try:
+        return {"identity": identity, "proposals": dbtools.list_proposals(conn)}
+    finally:
+        conn.close()

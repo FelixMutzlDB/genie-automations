@@ -3,5 +3,9 @@ fastapi
 uvicorn
 # psycopg (v3) is NOT pre-installed -- required or the app crashes on first Lakebase connect.
 psycopg[binary]
-# databricks-sdk: ensure a recent version for the Lakebase credential API.
+# databricks-sdk: recent version for the Lakebase credential API + serving OpenAI client.
 databricks-sdk>=0.40.0
+# openai: used only as a fallback client; the SDK's get_open_ai_client() is preferred.
+openai>=1.40.0
+# openpyxl: the deterministic parser (parse_lib.py) needs it for xlsx (csv is stdlib).
+openpyxl>=3.1.0

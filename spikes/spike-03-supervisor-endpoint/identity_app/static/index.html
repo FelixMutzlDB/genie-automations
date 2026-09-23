@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>genie-automations · supervisor (spike-03)</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--edge:#262b36;--ink:#e7eaf0;--dim:#9aa3b2;
+        --accent:#5b8cff;--ok:#3fb984;--bad:#e5637a;--warn:#e0a34b;--tool:#7c6cff;}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:10px 16px;border-bottom:1px solid var(--edge);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  .who{font-size:12px;color:var(--dim)}
+  .who b{color:var(--ok)}
+  .wrap{display:grid;grid-template-columns:1.5fr 1fr;gap:0;height:calc(100vh - 52px)}
+  .col{display:flex;flex-direction:column;min-height:0}
+  .col.right{border-left:1px solid var(--edge)}
+  .scroll{overflow:auto;padding:16px;flex:1;min-height:0}
+  .msg{margin:0 0 14px;max-width:90%}
+  .msg .role{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:3px}
+  .msg.user{margin-left:auto;text-align:right}
+  .msg.user .bubble{background:#20304f}
+  .bubble{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:9px 12px;white-space:pre-wrap;display:inline-block;text-align:left}
+  .events{border-top:1px solid var(--edge);max-height:34%;overflow:auto;padding:10px 16px;background:#12141a}
+  .events h3{margin:0 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .ev{border:1px solid var(--edge);border-left:3px solid var(--tool);border-radius:6px;padding:6px 9px;margin-bottom:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .ev .tn{color:var(--tool);font-weight:600}
+  .ev pre{margin:4px 0 0;white-space:pre-wrap;color:var(--dim);font-size:11px}
+  .composer{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--edge)}
+  .composer input{flex:1;background:var(--panel);border:1px solid var(--edge);border-radius:8px;color:var(--ink);padding:9px 12px;font-size:14px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer;font-weight:600}
+  button.ghost{background:transparent;border:1px solid var(--edge);color:var(--ink);font-weight:500}
+  button.ok{background:var(--ok)} button.warn{background:var(--warn)} button:disabled{opacity:.4;cursor:default}
+  .right h3{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px}
+  .prop{border:1px solid var(--edge);border-radius:8px;padding:10px;margin-bottom:10px;background:var(--panel)}
+  .prop .pid{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent)}
+  .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:20px;border:1px solid var(--edge);margin-left:6px}
+  .badge.staged{color:var(--warn);border-color:var(--warn)}
+  .badge.approved{color:var(--accent);border-color:var(--accent)}
+  .badge.committed{color:var(--ok);border-color:var(--ok)}
+  .prop .diff{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);margin:6px 0;white-space:pre-wrap}
+  .prop .who2{font-size:11px;color:var(--dim)}
+  .acts{display:flex;gap:6px;margin-top:8px}
+  .outcome{font-size:12px;margin-top:8px;padding:7px 9px;border-radius:6px}
+  .outcome.ok{background:#12321f;color:var(--ok);border:1px solid #1c5636}
+  .outcome.bad{background:#3a1720;color:var(--bad);border:1px solid #5c2233}
+  .hint{font-size:12px;color:var(--dim);padding:0 16px 10px}
+  code{background:#000;padding:1px 5px;border-radius:4px;color:#cdd3df}
+</style>
+</head>
+<body>
+<header>
+  <h1>🤝 genie-automations · reconciliation co-worker</h1>
+  <span class="who">acting as <b id="who">…</b> · <span id="mode">spike-03 · agent runs in-app, writes via OBO</span></span>
+</header>
+<div class="wrap">
+  <div class="col">
+    <div class="scroll" id="transcript"></div>
+    <div class="events"><h3>Tool events (what the agent actually did)</h3><div id="events"></div></div>
+    <div class="hint">Try: <code>list the remittances</code> · <code>correct allocation A-2 on RDEMO-1 to 1150</code> ·
+      <code>parse submission_injection.csv and stage it</code> · <code>approve and commit it yourself</code> (watch it refuse)</div>
+    <div class="composer">
+      <input id="input" placeholder="Ask the co-worker… (Enter to send)" autocomplete="off"/>
+      <button id="send">Send</button>
+    </div>
+  </div>
+  <div class="col right">
+    <div class="scroll">
+      <h3>Proposals — approve / commit are YOUR explicit actions</h3>
+      <div id="proposals"></div>
+    </div>
+  </div>
+</div>
+<script>
+const SID = "s-" + Math.random().toString(36).slice(2,9);
+const $ = s => document.querySelector(s);
+const transcript = $("#transcript"), events = $("#events"), proposals = $("#proposals");
+
+function esc(s){return (s??"").toString().replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function addMsg(role, text){
+  const d=document.createElement("div"); d.className="msg "+role;
+  d.innerHTML=`<div class="role">${role==="user"?"you":"co-worker"}</div><div class="bubble">${esc(text)}</div>`;
+  transcript.appendChild(d); transcript.scrollTop=transcript.scrollHeight;
+}
+function renderEvents(evs){
+  if(!evs||!evs.length) return;
+  for(const e of evs){
+    const d=document.createElement("div"); d.className="ev";
+    d.innerHTML=`<span class="tn">${esc(e.tool)}</span>(${esc(JSON.stringify(e.args))})
+      <pre>${esc(JSON.stringify(e.result,null,1)).slice(0,1400)}</pre>`;
+    events.appendChild(d);
+  }
+  events.scrollTop=events.scrollHeight;
+}
+function renderProposals(props){
+  proposals.innerHTML="";
+  if(!props||!props.length){proposals.innerHTML='<div class="hint" style="padding:0">No proposals yet. Ask the agent to stage a correction, or approve a pre-seeded one.</div>';return;}
+  for(const p of props){
+    const st=p.state;
+    const d=document.createElement("div"); d.className="prop";
+    const canApprove = (st==="staged"||st==="validated");
+    const canCommit  = (st==="approved");
+    d.innerHTML=`<span class="pid">${esc(p.proposal_id)}</span><span class="badge ${esc(st)}">${esc(st)}</span>
+      <div class="diff">${esc(JSON.stringify(p.diff))}</div>
+      <div class="who2">proposer: <b>${esc(p.proposer_id)}</b>${p.approver_id?` · approver: <b>${esc(p.approver_id)}</b>`:""}</div>
+      <div class="acts">
+        <button class="ok"   ${canApprove?"":"disabled"} data-act="approve" data-id="${esc(p.proposal_id)}">Approve</button>
+        <button class="warn" ${canCommit?"":"disabled"}  data-act="commit"  data-id="${esc(p.proposal_id)}">Commit</button>
+      </div><div class="outcome" style="display:none"></div>`;
+    proposals.appendChild(d);
+  }
+}
+async function post(url, body){
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  return {status:r.status, data:await r.json().catch(()=>({}))};
+}
+async function send(){
+  const inp=$("#input"); const text=inp.value.trim(); if(!text) return;
+  inp.value=""; addMsg("user",text); $("#send").disabled=true;
+  const {status,data}=await post("/chat",{session_id:SID,message:text});
+  $("#send").disabled=false;
+  if(status===401){addMsg("assistant","⛔ "+(data.detail||"fail-closed: no forwarded identity."));return;}
+  if(data.identity) $("#who").textContent=data.identity;
+  renderEvents(data.tool_events);
+  addMsg("assistant", data.reply||"(no reply)");
+  renderProposals(data.proposals);
+}
+proposals.addEventListener("click", async ev=>{
+  const b=ev.target.closest("button[data-act]"); if(!b) return;
+  const act=b.dataset.act, id=b.dataset.id, card=b.closest(".prop"), out=card.querySelector(".outcome");
+  b.disabled=true; out.style.display="block"; out.className="outcome"; out.textContent="…";
+  const {status,data}=await post("/"+act,{proposal_id:id});
+  if(status===401){out.className="outcome bad";out.textContent="⛔ "+(data.detail||"fail-closed");b.disabled=false;return;}
+  if(data.ok){
+    out.className="outcome ok";
+    if(act==="commit" && data.audit){
+      out.innerHTML=`✅ committed. <b>audit.actor_id = ${esc(data.audit.actor_id)}</b> · db_principal = ${esc(data.audit.db_principal)}
+        · commit_seq ${esc((data.result||{}).commit_seq)} · sha ${esc((data.audit.payload_sha256||"").slice(0,12))}…`;
+    } else { out.textContent="✅ "+JSON.stringify(data.result); }
+  } else {
+    out.className="outcome bad";
+    out.innerHTML=`⛔ <b>${esc(data.sqlstate||"error")}</b> — ${esc(data.error)}
+      ${data.sqlstate==="GA003"?"<br><i>Segregation of duties: a DIFFERENT authenticated user must approve. This is the guardrail working.</i>":""}
+      ${data.sqlstate==="GA005"?"<br><i>Over-allocation invariant: the sum would exceed the remittance total. Nothing was written.</i>":""}`;
+  }
+  // refresh proposal states
+  const pr=await fetch("/proposals"); const pd=await pr.json().catch(()=>({}));
+  if(pd.proposals) renderProposals(pd.proposals);
+});
+$("#send").addEventListener("click",send);
+$("#input").addEventListener("keydown",e=>{if(e.key==="Enter")send();});
+// initial load
+(async()=>{const pr=await fetch("/proposals");const pd=await pr.json().catch(()=>({}));
+  if(pd.identity)$("#who").textContent=pd.identity; if(pd.proposals)renderProposals(pd.proposals);
+  addMsg("assistant","Hi — I'm your reconciliation co-worker. I can read the live ledger, parse an uploaded submission, and stage corrections. I can't approve or commit — you do that with the buttons on the right (and a different person must approve what you propose). What would you like to reconcile?");
+})();
+</script>
+</body>
+</html>
