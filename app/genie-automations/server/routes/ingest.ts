@@ -17,9 +17,17 @@ const SCHEMA = 'genie_spike';
 const PARSER_VERSION = 'spike-02-v2';
 const CONFIG_VERSION = 'receivables-v1';
 
-interface QueryResult { rows: Record<string, unknown>[] }
-interface UserDb { query(text: string, params?: unknown[]): Promise<QueryResult> }
-interface ExecutionResult<T> { ok: boolean; data?: T; error?: unknown }
+interface QueryResult {
+  rows: Record<string, unknown>[];
+}
+interface UserDb {
+  query(text: string, params?: unknown[]): Promise<QueryResult>;
+}
+interface ExecutionResult<T> {
+  ok: boolean;
+  data?: T;
+  error?: unknown;
+}
 export interface IngestAppKit {
   lakebase: UserDb & { asUser(req: Request): UserDb };
   files(name: string): {
@@ -42,6 +50,79 @@ export function isIngestAppKit(value: object): value is IngestAppKit {
 }
 
 const idSchema = z.string().uuid();
+const confirmSchema = z
+  .object({
+    parse_id: idSchema,
+    selected_row_ids: z.array(z.number().int().positive()).min(1),
+  })
+  .strict();
+
+interface CanonicalArtifactRow {
+  values: { remittance_id: string; invoice_id: string; amount: string };
+  source_row: number;
+}
+
+interface IngestArtifact {
+  parse_id: string;
+  config_version: string;
+  status: string;
+  rows: CanonicalArtifactRow[];
+}
+
+function isReceivablesTask(taskType: string): boolean {
+  return taskType === 'reconciliation' || taskType === 'allocation_upsert' || taskType === 'receivables';
+}
+
+function canonicalArtifact(raw: string, parseId: string, configVersion: string): IngestArtifact {
+  const artifact = z
+    .object({
+      parse_id: z.literal(parseId),
+      config_version: z.literal(configVersion),
+      status: z.literal('ready'),
+      rows: z.array(
+        z
+          .object({
+            source_row: z.number().int().positive(),
+            values: z
+              .object({
+                remittance_id: z.string().min(1),
+                invoice_id: z.string().min(1),
+                amount: z.string().regex(/^-?\d+(?:\.\d+)?$/),
+              })
+              .passthrough(),
+          })
+          .passthrough()
+      ),
+    })
+    .passthrough()
+    .parse(JSON.parse(raw));
+  return artifact;
+}
+
+async function recordConfirmActivity(
+  db: UserDb,
+  input: { taskId: string; actor: string; status: 'success' | 'failure'; proposalIds?: string[]; reason?: string }
+): Promise<void> {
+  try {
+    await db.query(
+      `INSERT INTO ${SCHEMA}.task_activity(task_id, user_id, action, status, detail, proposal_id)
+       VALUES ($1,$2,'ingest_confirm',$3,$4::jsonb,$5)`,
+      [
+        input.taskId,
+        input.actor,
+        input.status,
+        JSON.stringify(
+          input.status === 'success'
+            ? { proposal_count: input.proposalIds?.length ?? 0 }
+            : { reason: input.reason ?? 'confirmation_failed' }
+        ),
+        input.proposalIds?.length === 1 ? input.proposalIds[0] : null,
+      ]
+    );
+  } catch (error) {
+    console.error('Failed to record ingest-confirm activity:', error);
+  }
+}
 
 export function actorOf(req: Request): string | null {
   const actor = req.header('x-forwarded-email')?.trim();
@@ -52,7 +133,12 @@ function friendlyFailure(res: Response, status: number, message: string): void {
   res.status(status).json({ error: message });
 }
 
-async function authorizedTask(appkit: IngestAppKit, req: Request, taskId: string, actor: string): Promise<IngestTaskGate | undefined> {
+async function authorizedTask(
+  appkit: IngestAppKit,
+  req: Request,
+  taskId: string,
+  actor: string
+): Promise<IngestTaskGate | undefined> {
   const result = await appkit.lakebase.asUser(req).query(
     `SELECT EXISTS (
        SELECT 1 FROM ${SCHEMA}.task_member tm
@@ -84,11 +170,16 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const failure = ingestGateFailure(task);
         if (failure === 'not_member') return friendlyFailure(res, 403, 'You are not a member of this automation.');
         if (failure === 'ingest_disabled') return friendlyFailure(res, 409, 'File collection is not enabled here.');
-        if (failure === 'target_unbound') return friendlyFailure(res, 409, 'This automation needs a complete target binding.');
+        if (failure === 'target_unbound')
+          return friendlyFailure(res, 409, 'This automation needs a complete target binding.');
 
         const encodedName = req.header('x-upload-filename') ?? '';
         let filename = '';
-        try { filename = decodeURIComponent(encodedName); } catch { return friendlyFailure(res, 400, 'The file name is invalid.'); }
+        try {
+          filename = decodeURIComponent(encodedName);
+        } catch {
+          return friendlyFailure(res, 400, 'The file name is invalid.');
+        }
         const extension = safeExtension(filename);
         if (!extension) return friendlyFailure(res, 415, 'Choose a CSV or XLSX file.');
         if (!Buffer.isBuffer(req.body) || req.body.length === 0) return friendlyFailure(res, 400, 'The file is empty.');
@@ -126,15 +217,23 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
 
         const run = await appkit.jobs('parse').runNow({
           args: [
-            '--input', `${volumeRoot.replace(/\/$/, '')}/${relativePath}`,
-            '--artifact', `${volumeRoot.replace(/\/$/, '')}/${artifactPath}`,
-            '--sha256', digest,
-            '--parse-id', parseId,
-            '--filename', `original.${extension}`,
+            '--input',
+            `${volumeRoot.replace(/\/$/, '')}/${relativePath}`,
+            '--artifact',
+            `${volumeRoot.replace(/\/$/, '')}/${artifactPath}`,
+            '--sha256',
+            digest,
+            '--parse-id',
+            parseId,
+            '--filename',
+            `original.${extension}`,
           ],
         });
         if (!run.ok || typeof run.data?.run_id !== 'number') throw new Error('parse job was not accepted');
-        await db.query(`UPDATE ${SCHEMA}.ingest_run SET run_id=$2, status='PENDING', updated_at=now() WHERE parse_id=$1`, [parseId, run.data.run_id]);
+        await db.query(
+          `UPDATE ${SCHEMA}.ingest_run SET run_id=$2, status='PENDING', updated_at=now() WHERE parse_id=$1`,
+          [parseId, run.data.run_id]
+        );
         res.status(202).json({ parse_id: parseId, run_id: run.data.run_id, sha256: digest });
       } catch (error) {
         console.error('Ingest upload failed:', error);
@@ -151,7 +250,8 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const record = await db.query(
           `SELECT ir.run_id, ir.status FROM ${SCHEMA}.ingest_run ir
              JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
-            WHERE ir.parse_id=$1 AND tm.user_id=$2`, [parseId, actor]
+            WHERE ir.parse_id=$1 AND tm.user_id=$2`,
+          [parseId, actor]
         );
         const row = record.rows[0];
         if (!row) return friendlyFailure(res, 403, 'You cannot view this parse run.');
@@ -163,7 +263,10 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           const output = await appkit.jobs('parse').getRunOutput(runId);
           if (!output.ok) throw new Error('parse output unavailable');
         }
-        await db.query(`UPDATE ${SCHEMA}.ingest_run SET status=$2, updated_at=now() WHERE parse_id=$1`, [parseId, status]);
+        await db.query(`UPDATE ${SCHEMA}.ingest_run SET status=$2, updated_at=now() WHERE parse_id=$1`, [
+          parseId,
+          status,
+        ]);
         res.json({
           parse_id: parseId,
           run_id: runId,
@@ -184,15 +287,143 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const record = await appkit.lakebase.query(
           `SELECT ir.artifact_ref FROM ${SCHEMA}.ingest_run ir
              JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
-            WHERE ir.parse_id=$1 AND tm.user_id=$2`, [parseId, actor]
+            WHERE ir.parse_id=$1 AND tm.user_id=$2`,
+          [parseId, actor]
         );
         const artifact = record.rows[0]?.['artifact_ref'];
         if (typeof artifact !== 'string') return friendlyFailure(res, 403, 'You cannot view this preview.');
-        const body = await appkit.files('uploads').asUser(req).read(artifact, { maxSize: 10 * 1024 * 1024 });
+        const body = await appkit
+          .files('uploads')
+          .asUser(req)
+          .read(artifact, { maxSize: 10 * 1024 * 1024 });
         res.json(JSON.parse(body));
       } catch (error) {
         console.error('Ingest preview failed:', error);
         friendlyFailure(res, 409, 'The preview is not ready yet, or its configuration is stale.');
+      }
+    });
+
+    app.post('/api/ingest/confirm', async (req, res) => {
+      const actor = actorOf(req);
+      let taskId: string | undefined;
+      let userDb: UserDb | undefined;
+      try {
+        if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
+        const body = confirmSchema.parse(req.body);
+        const run = await appkit.lakebase.query(
+          `SELECT task_id, artifact_ref, config_version FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`,
+          [body.parse_id]
+        );
+        const runRow = run.rows[0];
+        taskId = typeof runRow?.['task_id'] === 'string' ? runRow['task_id'] : undefined;
+        if (!taskId)
+          return friendlyFailure(res, 404, 'That preview is no longer available. Please upload the file again.');
+
+        userDb = appkit.lakebase.asUser(req);
+        const authorization = await userDb.query(
+          `SELECT EXISTS (
+             SELECT 1 FROM ${SCHEMA}.task_member tm WHERE tm.task_id=t.task_id AND tm.user_id=$2
+           ) AS is_member,
+           t.task_type, t.ingest_enabled, t.target_catalog, t.target_schema, t.target_table
+           FROM ${SCHEMA}.task t WHERE t.task_id=$1 AND t.status='active'`,
+          [taskId, actor]
+        );
+        const taskRow = authorization.rows[0];
+        const gate: IngestTaskGate | undefined = taskRow
+          ? {
+              is_member: taskRow['is_member'] === true,
+              ingest_enabled: taskRow['ingest_enabled'] === true,
+              target_catalog: typeof taskRow['target_catalog'] === 'string' ? taskRow['target_catalog'] : null,
+              target_schema: typeof taskRow['target_schema'] === 'string' ? taskRow['target_schema'] : null,
+              target_table: typeof taskRow['target_table'] === 'string' ? taskRow['target_table'] : null,
+            }
+          : undefined;
+        const failure = ingestGateFailure(gate);
+        if (failure) {
+          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: failure });
+          const status = failure === 'not_member' ? 403 : 409;
+          const message =
+            failure === 'not_member'
+              ? 'You are not a member of this automation.'
+              : failure === 'ingest_disabled'
+                ? 'File collection is not enabled here.'
+                : 'This automation needs a complete target binding.';
+          return friendlyFailure(res, status, message);
+        }
+        const taskType = typeof taskRow?.['task_type'] === 'string' ? taskRow['task_type'] : '';
+        if (!isReceivablesTask(taskType)) {
+          // TODO: stage_change must become task-type-aware before vendor-bank-detail ingest can be staged safely.
+          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'unsupported_task_type' });
+          return friendlyFailure(
+            res,
+            409,
+            'Staging from upload is currently available for receivables collection only'
+          );
+        }
+
+        const artifactRef = runRow?.['artifact_ref'];
+        const configVersion = runRow?.['config_version'];
+        if (typeof artifactRef !== 'string' || typeof configVersion !== 'string') throw new Error('invalid ingest run');
+        const artifactRaw = await appkit
+          .files('uploads')
+          .asUser(req)
+          .read(artifactRef, { maxSize: 10 * 1024 * 1024 });
+        const artifact = canonicalArtifact(artifactRaw, body.parse_id, configVersion);
+        const selectedIds = new Set(body.selected_row_ids);
+        if (selectedIds.size !== body.selected_row_ids.length) throw new Error('duplicate selected row');
+        const selected = artifact.rows.filter((row) => selectedIds.has(row.source_row));
+        if (selected.length !== selectedIds.size) throw new Error('selected row is not in canonical artifact');
+
+        const grouped = new Map<string, CanonicalArtifactRow[]>();
+        for (const row of selected)
+          grouped.set(row.values.remittance_id, [...(grouped.get(row.values.remittance_id) ?? []), row]);
+        const stagedDiffs: Array<{
+          change_type: 'allocation_upsert';
+          diff: { remittance_id: string; allocations: Record<string, unknown>[] };
+        }> = [];
+        for (const [remittanceId, rows] of [...grouped].sort(([left], [right]) => left.localeCompare(right))) {
+          const allocations: Record<string, unknown>[] = [];
+          for (const row of [...rows].sort((left, right) => left.source_row - right.source_row)) {
+            const current = await userDb.query(
+              `SELECT allocation_id, entity_version FROM ${SCHEMA}.allocation
+               WHERE remittance_id=$1 AND invoice_id=$2 ORDER BY allocation_id LIMIT 1`,
+              [remittanceId, row.values.invoice_id]
+            );
+            const existing = current.rows[0];
+            allocations.push({
+              allocation_id:
+                typeof existing?.['allocation_id'] === 'string'
+                  ? existing['allocation_id']
+                  : `upload-${body.parse_id}-${row.source_row}`,
+              invoice_id: row.values.invoice_id,
+              amount: row.values.amount,
+              ...(typeof existing?.['entity_version'] === 'number' || typeof existing?.['entity_version'] === 'string'
+                ? { expected_version: existing['entity_version'] }
+                : {}),
+            });
+          }
+          const diff = { remittance_id: remittanceId, allocations };
+          stagedDiffs.push({ change_type: 'allocation_upsert', diff });
+        }
+        // One SQL statement makes multi-remittance staging atomic while retaining the guarded procedure as the sole boundary.
+        const staged = await userDb.query(
+          `SELECT ${SCHEMA}.stage_change($1, item->>'change_type', $2, item->'diff') AS proposal_id
+             FROM jsonb_array_elements($3::jsonb) AS item`,
+          [taskId, configVersion, JSON.stringify(stagedDiffs)]
+        );
+        const proposalIds = staged.rows
+          .map((row) => row['proposal_id'])
+          .filter((id): id is string => typeof id === 'string');
+        if (proposalIds.length !== stagedDiffs.length) throw new Error('stage_change did not return every proposal');
+        await recordConfirmActivity(userDb, { taskId, actor, status: 'success', proposalIds });
+        res.status(201).json({ proposal_ids: proposalIds });
+      } catch (error) {
+        if (taskId && actor && userDb) {
+          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'confirmation_failed' });
+        }
+        console.error('Ingest confirm failed:', error);
+        const status = error instanceof z.ZodError ? 400 : 409;
+        friendlyFailure(res, status, 'We could not safely stage those rows. Nothing was changed.');
       }
     });
   });

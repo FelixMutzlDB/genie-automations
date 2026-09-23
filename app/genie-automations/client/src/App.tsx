@@ -139,6 +139,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
   chat: 'Asked the co-worker',
   approve: 'Approved a change',
   commit: 'Applied a change',
+  ingest_confirm: 'Confirmed uploaded rows for review',
   task_created: 'Created this automation',
   joined: 'Joined this automation',
 };
@@ -232,6 +233,7 @@ export default function App() {
   const [ingestOpen, setIngestOpen] = useState(false);
   const [ingestState, setIngestState] = useState<IngestUiState>({ phase: 'idle' });
   const [preview, setPreview] = useState<ParsePreview | null>(null);
+  const [selectedPreviewRows, setSelectedPreviewRows] = useState<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
@@ -253,6 +255,7 @@ export default function App() {
       resetState: () => setIngestState({ phase: 'idle' }),
       clearPreview: () => setPreview(null),
     });
+    setSelectedPreviewRows(new Set());
   }, []);
 
   const abortTaskRequests = useCallback(() => {
@@ -325,11 +328,14 @@ export default function App() {
   useEffect(() => {
     void loadTasks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => () => {
-    abortTaskRequests();
-    ingestRequestRef.current?.controller.abort();
-    ingestRequestRef.current = null;
-  }, [abortTaskRequests]);
+  useEffect(
+    () => () => {
+      abortTaskRequests();
+      ingestRequestRef.current?.controller.abort();
+      ingestRequestRef.current = null;
+    },
+    [abortTaskRequests]
+  );
   useEffect(() => {
     if (selectedTaskId) {
       const controller = new AbortController();
@@ -415,70 +421,120 @@ export default function App() {
   }, [createName, createType, ingestEnabled, loadTasks, targetCatalog, targetSchema, targetTable]);
 
   const canIngest = Boolean(
-    selectedTask?.ingest_enabled && selectedTask.target_catalog && selectedTask.target_schema && selectedTask.target_table
+    selectedTask?.ingest_enabled &&
+      selectedTask.target_catalog &&
+      selectedTask.target_schema &&
+      selectedTask.target_table
   );
 
-  const uploadForPreview = useCallback(async (file: File) => {
-    if (!selectedTask || !canIngest) return;
+  const uploadForPreview = useCallback(
+    async (file: File) => {
+      if (!selectedTask || !canIngest) return;
+      const taskId = selectedTask.task_id;
+      ingestRequestRef.current?.controller.abort();
+      const controller = new AbortController();
+      const active: ActiveIngest = { controller, taskId };
+      ingestRequestRef.current = active;
+      const isCurrent = (parseId?: string) =>
+        selectedTaskIdRef.current === taskId && isCurrentIngest(ingestRequestRef.current, controller, taskId, parseId);
+      if (!isCurrent()) return;
+      setPreview(null);
+      setSelectedPreviewRows(new Set());
+      setIngestState((state) => reduceIngest(state, { type: 'START' }));
+      try {
+        const upload = await fetch(`/api/ingest/${encodeURIComponent(taskId)}/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream', 'x-upload-filename': encodeURIComponent(file.name) },
+          body: file,
+          signal: controller.signal,
+        });
+        const accepted = (await upload.json()) as { parse_id?: string; run_id?: number; error?: string };
+        if (!isCurrent()) return;
+        if (!upload.ok || !accepted.parse_id || typeof accepted.run_id !== 'number') {
+          throw new Error(accepted.error ?? 'We could not upload that file.');
+        }
+        const parseId = accepted.parse_id;
+        active.parseId = parseId;
+        if (!isCurrent(parseId)) return;
+        setIngestState((state) => reduceIngest(state, { type: 'ACCEPTED', parseId, runId: accepted.run_id! }));
+
+        const started = Date.now();
+        while (Date.now() - started < 120_000) {
+          await abortableDelay(1500, controller.signal);
+          if (!isCurrent(parseId)) return;
+          const poll = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/poll`, { signal: controller.signal });
+          const status = (await poll.json()) as { status?: PollStatus; message?: string; error?: string };
+          if (!isCurrent(parseId)) return;
+          if (!poll.ok || !status.status) throw new Error(status.error ?? 'We could not check the parser.');
+          setIngestState((state) => reduceIngest(state, { type: 'POLL', status: status.status! }));
+          if (status.status === 'succeeded') {
+            const result = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/preview`, {
+              signal: controller.signal,
+            });
+            const parsed = (await result.json()) as ParsePreview & { error?: string };
+            if (!isCurrent(parseId)) return;
+            if (!result.ok) throw new Error(parsed.error ?? 'The preview is not ready.');
+            setPreview(parsed);
+            setIngestState((state) => reduceIngest(state, { type: 'PREVIEW_READY' }));
+            return;
+          }
+          if (status.status === 'failed') {
+            throw new Error(status.message ?? 'The parser could not finish safely. Nothing was changed.');
+          }
+        }
+        throw new Error('Parsing is taking longer than expected. You can close this window and try again.');
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error)) return;
+        if (!isCurrent(active.parseId)) return;
+        const message = error instanceof Error ? error.message : 'We could not create a preview.';
+        setIngestState((state) => reduceIngest(state, { type: 'FAIL', message }));
+      } finally {
+        if (ingestRequestRef.current?.controller === controller) ingestRequestRef.current = null;
+      }
+    },
+    [canIngest, selectedTask]
+  );
+
+  const confirmPreview = useCallback(async () => {
+    if (!selectedTask || !preview || !ingestState.parseId || selectedPreviewRows.size === 0) return;
+    // TODO: stage_change must become task-type-aware before vendor-bank-detail ingest can be staged safely.
+    if (!['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask.task_type)) return;
     const taskId = selectedTask.task_id;
-    ingestRequestRef.current?.controller.abort();
+    const parseId = ingestState.parseId;
     const controller = new AbortController();
-    const active: ActiveIngest = { controller, taskId };
-    ingestRequestRef.current = active;
-    const isCurrent = (parseId?: string) =>
-      selectedTaskIdRef.current === taskId && isCurrentIngest(ingestRequestRef.current, controller, taskId, parseId);
-    if (!isCurrent()) return;
-    setPreview(null);
-    setIngestState((state) => reduceIngest(state, { type: 'START' }));
+    ingestRequestRef.current?.controller.abort();
+    ingestRequestRef.current = { controller, taskId, parseId };
+    const isCurrent = () =>
+      selectedTaskIdRef.current === taskId &&
+      isCurrentIngest(ingestRequestRef.current, controller, taskId, parseId) &&
+      preview.parse_id === parseId;
+    setIngestState((state) => reduceIngest(state, { type: 'CONFIRM' }));
     try {
-      const upload = await fetch(`/api/ingest/${encodeURIComponent(taskId)}/upload`, {
+      const response = await fetch('/api/ingest/confirm', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream', 'x-upload-filename': encodeURIComponent(file.name) },
-        body: file,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parse_id: parseId, selected_row_ids: [...selectedPreviewRows].sort((a, b) => a - b) }),
         signal: controller.signal,
       });
-      const accepted = (await upload.json()) as { parse_id?: string; run_id?: number; error?: string };
+      const result = (await response.json()) as { proposal_ids?: string[]; error?: string };
       if (!isCurrent()) return;
-      if (!upload.ok || !accepted.parse_id || typeof accepted.run_id !== 'number') {
-        throw new Error(accepted.error ?? 'We could not upload that file.');
-      }
-      const parseId = accepted.parse_id;
-      active.parseId = parseId;
-      if (!isCurrent(parseId)) return;
-      setIngestState((state) => reduceIngest(state, { type: 'ACCEPTED', parseId, runId: accepted.run_id! }));
-
-      const started = Date.now();
-      while (Date.now() - started < 120_000) {
-        await abortableDelay(1500, controller.signal);
-        if (!isCurrent(parseId)) return;
-        const poll = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/poll`, { signal: controller.signal });
-        const status = (await poll.json()) as { status?: PollStatus; message?: string; error?: string };
-        if (!isCurrent(parseId)) return;
-        if (!poll.ok || !status.status) throw new Error(status.error ?? 'We could not check the parser.');
-        setIngestState((state) => reduceIngest(state, { type: 'POLL', status: status.status! }));
-        if (status.status === 'succeeded') {
-          const result = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/preview`, { signal: controller.signal });
-          const parsed = (await result.json()) as ParsePreview & { error?: string };
-          if (!isCurrent(parseId)) return;
-          if (!result.ok) throw new Error(parsed.error ?? 'The preview is not ready.');
-          setPreview(parsed);
-          setIngestState((state) => reduceIngest(state, { type: 'PREVIEW_READY' }));
-          return;
-        }
-        if (status.status === 'failed') {
-          throw new Error(status.message ?? 'The parser could not finish safely. Nothing was changed.');
-        }
-      }
-      throw new Error('Parsing is taking longer than expected. You can close this window and try again.');
+      if (!response.ok || !result.proposal_ids?.length)
+        throw new Error(result.error ?? 'We could not stage those rows.');
+      setIngestState((state) => reduceIngest(state, { type: 'STAGED' }));
+      await refreshTaskViews(taskId, controller.signal);
     } catch (error) {
-      if (controller.signal.aborted || isAbortError(error)) return;
-      if (!isCurrent(active.parseId)) return;
-      const message = error instanceof Error ? error.message : 'We could not create a preview.';
-      setIngestState((state) => reduceIngest(state, { type: 'FAIL', message }));
+      if (controller.signal.aborted || isAbortError(error) || !isCurrent()) return;
+      setIngestState((state) =>
+        reduceIngest(state, {
+          type: 'FAIL',
+          message:
+            error instanceof Error ? error.message : 'We could not safely stage those rows. Nothing was changed.',
+        })
+      );
     } finally {
       if (ingestRequestRef.current?.controller === controller) ingestRequestRef.current = null;
     }
-  }, [canIngest, selectedTask]);
+  }, [ingestState.parseId, preview, refreshTaskViews, selectedPreviewRows, selectedTask]);
 
   const send = useCallback(
     async (text: string) => {
@@ -718,7 +774,10 @@ export default function App() {
                     accept=".csv,.xlsx"
                     onChange={(event) => {
                       const file = event.target.files?.[0];
-                      if (file) { setIngestOpen(true); void uploadForPreview(file); }
+                      if (file) {
+                        setIngestOpen(true);
+                        void uploadForPreview(file);
+                      }
                       event.target.value = '';
                     }}
                   />
@@ -726,7 +785,11 @@ export default function App() {
                     variant="outline"
                     size="icon"
                     disabled={!canIngest}
-                    title={canIngest ? 'Upload CSV or Excel for a safe preview' : 'Enable ingest and bind a catalog, schema, and table first'}
+                    title={
+                      canIngest
+                        ? 'Upload CSV or Excel for a safe preview'
+                        : 'Enable ingest and bind a catalog, schema, and table first'
+                    }
                     onClick={() => fileInputRef.current?.click()}
                   >
                     <Plus className="h-4 w-4" />
@@ -959,44 +1022,128 @@ export default function App() {
             <DialogContent className="max-w-4xl max-h-[85vh] overflow-auto">
               <DialogHeader>
                 <DialogTitle>File parse preview</DialogTitle>
-                <DialogDescription>This preview cannot apply, stage, or approve financial changes.</DialogDescription>
+                <DialogDescription>
+                  Review and select the rows you want to prepare for a separate human review.
+                </DialogDescription>
               </DialogHeader>
               {ingestState.phase === 'uploading' && <p>Uploading the original bytes and checking their fingerprint…</p>}
               {ingestState.phase === 'parsing' && <p>Parsing safely in a separate job…</p>}
               {ingestState.phase === 'error' && (
-                <Alert variant="destructive"><AlertDescription>{ingestState.message}</AlertDescription></Alert>
+                <Alert variant="destructive">
+                  <AlertDescription>{ingestState.message}</AlertDescription>
+                </Alert>
+              )}
+              {ingestState.phase === 'confirming' && <p>Preparing the selected rows for review…</p>}
+              {ingestState.phase === 'staged' && (
+                <Alert>
+                  <AlertDescription>
+                    Staged for review. The proposals are now available in the Proposals panel for another person to
+                    approve.
+                  </AlertDescription>
+                </Alert>
               )}
               {ingestState.phase === 'preview' && preview && (
                 <div className="space-y-4">
                   <p className="text-xs text-muted-foreground break-all">SHA-256: {preview.sha256}</p>
-                  {preview.warnings.map((warning) => <Alert key={warning}><AlertDescription>{warning}</AlertDescription></Alert>)}
+                  {preview.warnings.map((warning) => (
+                    <Alert key={warning}>
+                      <AlertDescription>{warning}</AlertDescription>
+                    </Alert>
+                  ))}
                   {preview.rejected_rows.map((rejected) => (
                     <Alert key={`${rejected.code}-${rejected.source_row}`} variant="destructive">
-                      <AlertDescription>{(() => {
-                        const friendly = humanizeIngestReject(rejected.code);
-                        return `${friendly.title}. ${friendly.guidance}${rejected.source_row ? ` Source row ${rejected.source_row}.` : ''}`;
-                      })()}</AlertDescription>
+                      <AlertDescription>
+                        {(() => {
+                          const friendly = humanizeIngestReject(rejected.code);
+                          return `${friendly.title}. ${friendly.guidance}${rejected.source_row ? ` Source row ${rejected.source_row}.` : ''}`;
+                        })()}
+                      </AlertDescription>
                     </Alert>
                   ))}
                   {preview.rows.length === 0 ? (
-                    <Empty><EmptyHeader><EmptyTitle>No accepted rows</EmptyTitle></EmptyHeader><EmptyDescription>Review the guidance above.</EmptyDescription></Empty>
+                    <Empty>
+                      <EmptyHeader>
+                        <EmptyTitle>No accepted rows</EmptyTitle>
+                      </EmptyHeader>
+                      <EmptyDescription>Review the guidance above.</EmptyDescription>
+                    </Empty>
                   ) : (
-                    <div className="overflow-auto rounded-md border">
-                      <table className="w-full text-sm">
-                        <thead><tr className="border-b bg-muted">
-                          <th className="p-2 text-left">Source row</th>
-                          {Object.keys(preview.rows[0]?.values ?? {}).map((column) => <th key={column} className="p-2 text-left">{column.replaceAll('_', ' ')}</th>)}
-                        </tr></thead>
-                        <tbody>{preview.rows.map((row) => <tr key={row.source_row} className="border-b">
-                          <td className="p-2">{row.source_row}</td>
-                          {Object.keys(preview.rows[0]?.values ?? {}).map((column) => <td key={column} className="p-2">{row.values[column] ?? '—'}</td>)}
-                        </tr>)}</tbody>
-                      </table>
+                    <div className="space-y-3">
+                      {!['reconciliation', 'allocation_upsert', 'receivables'].includes(
+                        selectedTask?.task_type ?? ''
+                      ) && (
+                        <Alert>
+                          <AlertDescription>
+                            Staging from upload is currently available for receivables collection only
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      {['reconciliation', 'allocation_upsert', 'receivables'].includes(
+                        selectedTask?.task_type ?? ''
+                      ) && (
+                        <p className="text-sm">
+                          {selectedPreviewRows.size === 0
+                            ? 'Select the rows to stage. Nothing is applied yet.'
+                            : `${selectedPreviewRows.size} ${selectedPreviewRows.size === 1 ? 'row' : 'rows'} selected. Confirming will create proposals for human review.`}
+                        </p>
+                      )}
+                      <div className="overflow-auto rounded-md border">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b bg-muted">
+                              <th className="p-2 text-left">Select</th>
+                              <th className="p-2 text-left">Source row</th>
+                              {Object.keys(preview.rows[0]?.values ?? {}).map((column) => (
+                                <th key={column} className="p-2 text-left">
+                                  {column.replaceAll('_', ' ')}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {preview.rows.map((row) => (
+                              <tr key={row.source_row} className="border-b">
+                                <td className="p-2">
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Select source row ${row.source_row}`}
+                                    checked={selectedPreviewRows.has(row.source_row)}
+                                    onChange={(event) =>
+                                      setSelectedPreviewRows((current) => {
+                                        const next = new Set(current);
+                                        if (event.target.checked) next.add(row.source_row);
+                                        else next.delete(row.source_row);
+                                        return next;
+                                      })
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">{row.source_row}</td>
+                                {Object.keys(preview.rows[0]?.values ?? {}).map((column) => (
+                                  <td key={column} className="p-2">
+                                    {row.values[column] ?? '—'}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
                 </div>
               )}
-              <DialogFooter><Button variant="outline" onClick={closeIngest}>Close</Button></DialogFooter>
+              <DialogFooter>
+                <Button variant="outline" onClick={closeIngest}>
+                  Close
+                </Button>
+                {ingestState.phase === 'preview' &&
+                  ['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask?.task_type ?? '') && (
+                    <Button disabled={selectedPreviewRows.size === 0} onClick={() => void confirmPreview()}>
+                      Confirm selected rows
+                    </Button>
+                  )}
+              </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>

@@ -1,14 +1,21 @@
 import { Application, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { setupIngestRoutes } from './ingest';
+import { readFileSync } from 'node:fs';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
 function response() {
   const state: { status?: number; body?: unknown } = {};
   const res = {
-    status(code: number) { state.status = code; return res; },
-    json(body: unknown) { state.body = body; return res; },
+    status(code: number) {
+      state.status = code;
+      return res;
+    },
+    json(body: unknown) {
+      state.body = body;
+      return res;
+    },
   } as Response;
   return { res, state };
 }
@@ -38,8 +45,12 @@ function harness(
   });
   const getRunOutput = vi.fn().mockResolvedValue({ ok: true, data: {} });
   const app = {
-    post(path: string, ...callbacks: unknown[]) { handlers.set(`POST ${path}`, callbacks[callbacks.length - 1] as Handler); },
-    get(path: string, handler: Handler) { handlers.set(`GET ${path}`, handler); },
+    post(path: string, ...callbacks: unknown[]) {
+      handlers.set(`POST ${path}`, callbacks[callbacks.length - 1] as Handler);
+    },
+    get(path: string, handler: Handler) {
+      handlers.set(`GET ${path}`, handler);
+    },
   } as Application;
   const appkit: Parameters<typeof setupIngestRoutes>[0] = {
     lakebase: { query: appQuery, asUser: () => ({ query: userQuery }) },
@@ -55,7 +66,8 @@ function request(email: string | null = 'alice@example.com'): Request {
   return Object.assign({} as Request, {
     params: { taskId: 'receivables-eu' },
     body: Buffer.from('remittance_id,invoice_id,amount,pay_date\nR1,I1,10.00,2026-01-01\n'),
-    header: (name: string) => name === 'x-forwarded-email' ? (email ?? undefined) : name === 'x-upload-filename' ? 'input.csv' : undefined,
+    header: (name: string) =>
+      name === 'x-forwarded-email' ? (email ?? undefined) : name === 'x-upload-filename' ? 'input.csv' : undefined,
   });
 }
 
@@ -67,12 +79,22 @@ describe('ingest upload route', () => {
     const { res, state } = response();
     await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), res);
     expect(state.status).toBe(202);
-    expect(upload).toHaveBeenCalledWith(expect.stringMatching(/^receivables-eu\/[a-f0-9]{64}\/original\.csv$/), expect.any(Buffer), { overwrite: false });
+    expect(upload).toHaveBeenCalledWith(
+      expect.stringMatching(/^receivables-eu\/[a-f0-9]{64}\/original\.csv$/),
+      expect.any(Buffer),
+      { overwrite: false }
+    );
     expect(runNow).toHaveBeenCalledOnce();
   });
 
   it('does not call Volume or Jobs when membership fails', async () => {
-    const { handlers, upload, runNow } = harness({ is_member: false, ingest_enabled: true, target_catalog: 'c', target_schema: 's', target_table: 't' });
+    const { handlers, upload, runNow } = harness({
+      is_member: false,
+      ingest_enabled: true,
+      target_catalog: 'c',
+      target_schema: 's',
+      target_table: 't',
+    });
     const { res, state } = response();
     await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), res);
     expect(state.status).toBe(403);
@@ -114,7 +136,9 @@ describe('ingest upload route', () => {
 
   it('treats an upload race that reports already-exists as immutable dedup', async () => {
     const gate = { is_member: true, ingest_enabled: true, target_catalog: 'c', target_schema: 's', target_table: 't' };
-    const { handlers, runNow } = harness(gate, { uploadError: Object.assign(new Error('already exists'), { status: 409 }) });
+    const { handlers, runNow } = harness(gate, {
+      uploadError: Object.assign(new Error('already exists'), { status: 409 }),
+    });
     const { res, state } = response();
     await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), res);
     expect(state.status).toBe(202);
@@ -124,10 +148,13 @@ describe('ingest upload route', () => {
 
 describe('ingest poll and preview routes', () => {
   it('normalizes terminated failed Jobs and does not request their output', async () => {
-    const { handlers, getRunOutput } = harness({}, {
-      appRows: [{ run_id: 77, status: 'running' }],
-      run: { state: { life_cycle_state: 'TERMINATED', result_state: 'FAILED' } },
-    });
+    const { handlers, getRunOutput } = harness(
+      {},
+      {
+        appRows: [{ run_id: 77, status: 'running' }],
+        run: { state: { life_cycle_state: 'TERMINATED', result_state: 'FAILED' } },
+      }
+    );
     const req = request();
     req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
     const { res, state } = response();
@@ -137,15 +164,170 @@ describe('ingest poll and preview routes', () => {
   });
 
   it('reads an authorized preview through the caller-scoped Volume handle', async () => {
-    const { handlers, read } = harness({}, {
-      appRows: [{ artifact_ref: 'task/digest/parse.preview.json' }],
-      artifact: '{"status":"ready","rows":[]}',
-    });
+    const { handlers, read } = harness(
+      {},
+      {
+        appRows: [{ artifact_ref: 'task/digest/parse.preview.json' }],
+        artifact: '{"status":"ready","rows":[]}',
+      }
+    );
     const req = request();
     req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
     const { res, state } = response();
     await handlers.get('GET /api/ingest/:parseId/preview')?.(req, res);
     expect(read).toHaveBeenCalledWith('task/digest/parse.preview.json', { maxSize: 10 * 1024 * 1024 });
     expect(state.body).toMatchObject({ status: 'ready' });
+  });
+});
+
+const PARSE_ID = '98e06e87-9d56-4e92-a530-4bd4ad5b1264';
+const CANONICAL_ARTIFACT = JSON.stringify({
+  parse_id: PARSE_ID,
+  config_version: 'receivables-v1',
+  status: 'ready',
+  rows: [
+    { source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } },
+    { source_row: 3, values: { remittance_id: 'R-1', invoice_id: 'INV-2', amount: '20.00' } },
+  ],
+});
+
+function confirmHarness(task: Record<string, unknown>, options: { stageFails?: boolean } = {}) {
+  const handlers = new Map<string, Handler>();
+  const appQuery = vi.fn().mockResolvedValue({
+    rows: [
+      {
+        task_id: 'receivables-eu',
+        artifact_ref: 'artifact.json',
+        config_version: 'receivables-v1',
+      },
+    ],
+  });
+  const userQuery = vi.fn((sql: string, _params?: unknown[]) => {
+    if (sql.includes('FROM genie_spike.task t')) return Promise.resolve({ rows: [task] });
+    if (sql.includes('FROM genie_spike.allocation')) return Promise.resolve({ rows: [] });
+    if (sql.includes('.stage_change(')) {
+      if (options.stageFails) return Promise.reject(new Error('mock stage failure'));
+      return Promise.resolve({ rows: [{ proposal_id: 'p-upload' }] });
+    }
+    return Promise.resolve({ rows: [] });
+  });
+  const app = {
+    post(path: string, ...callbacks: unknown[]) {
+      handlers.set(`POST ${path}`, callbacks[callbacks.length - 1] as Handler);
+    },
+    get(path: string, handler: Handler) {
+      handlers.set(`GET ${path}`, handler);
+    },
+  } as Application;
+  const appkit: Parameters<typeof setupIngestRoutes>[0] = {
+    lakebase: { query: appQuery, asUser: () => ({ query: userQuery }) },
+    files: () => ({
+      asUser: () => ({
+        exists: vi.fn(),
+        upload: vi.fn(),
+        read: vi.fn().mockResolvedValue(CANONICAL_ARTIFACT),
+      }),
+    }),
+    jobs: () => ({ runNow: vi.fn(), getRun: vi.fn(), getRunOutput: vi.fn() }),
+    server: { extend: (register) => register(app) },
+  };
+  setupIngestRoutes(appkit);
+  const req = request();
+  req.params = {};
+  req.body = { parse_id: PARSE_ID, selected_row_ids: [2] };
+  return { handlers, req, userQuery };
+}
+
+const allowedTask = {
+  is_member: true,
+  ingest_enabled: true,
+  target_catalog: 'catalog',
+  target_schema: 'schema',
+  target_table: 'target',
+  task_type: 'reconciliation',
+};
+
+describe('ingest confirm route', () => {
+  it('rejects browser-supplied amounts or targets', async () => {
+    const { handlers, req, userQuery } = confirmHarness(allowedTask);
+    req.body = { parse_id: PARSE_ID, selected_row_ids: [2], amount: '999999', target_table: 'attacker_table' };
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(400);
+    expect(userQuery).not.toHaveBeenCalled();
+  });
+
+  it('refuses non-receivables tasks and records failure activity', async () => {
+    const { handlers, req, userQuery } = confirmHarness({ ...allowedTask, task_type: 'vendor_bank' });
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(409);
+    expect(state.body).toEqual({ error: 'Staging from upload is currently available for receivables collection only' });
+    expect(userQuery).toHaveBeenCalledWith(
+      expect.stringContaining('task_activity'),
+      expect.arrayContaining(['failure'])
+    );
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
+  });
+
+  it.each([
+    ['membership', { ...allowedTask, is_member: false }, 403],
+    ['ingest', { ...allowedTask, ingest_enabled: false }, 409],
+    ['target', { ...allowedTask, target_table: null }, 409],
+  ])('enforces %s authorization before staging', async (_label, task, expectedStatus) => {
+    const { handlers, req, userQuery } = confirmHarness(task);
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(expectedStatus);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
+  });
+
+  it('builds the diff from canonical server rows, stages OBO, and records success activity', async () => {
+    const { handlers, req, userQuery } = confirmHarness(allowedTask);
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(201);
+    const stageCall = userQuery.mock.calls.find(([sql]) => String(sql).includes('.stage_change('));
+    expect(stageCall?.[1]).toEqual([
+      'receivables-eu',
+      'receivables-v1',
+      JSON.stringify([
+        {
+          change_type: 'allocation_upsert',
+          diff: {
+            remittance_id: 'R-1',
+            allocations: [
+              {
+                allocation_id: `upload-${PARSE_ID}-2`,
+                invoice_id: 'INV-1',
+                amount: '10.00',
+              },
+            ],
+          },
+        },
+      ]),
+    ]);
+    expect(userQuery).toHaveBeenCalledWith(
+      expect.stringContaining('task_activity'),
+      expect.arrayContaining(['success'])
+    );
+  });
+
+  it('records failure activity when mocked stage_change fails', async () => {
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { stageFails: true });
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(409);
+    expect(userQuery).toHaveBeenCalledWith(
+      expect.stringContaining('task_activity'),
+      expect.arrayContaining(['failure'])
+    );
+  });
+
+  it('contains no direct proposal DML or approve/commit shortcut in the ingest route', () => {
+    const source = readFileSync(new URL('./ingest.ts', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+)?\$\{SCHEMA\}\.proposed_changes/i);
+    expect(source).not.toContain("state='approved'");
+    expect(source).not.toMatch(/\.(?:approve_change|commit_change)\s*\(/);
   });
 });
