@@ -366,7 +366,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         }
         res.json({ identity: actorOf(req), proposals: await listProposals(d, taskId) });
       } catch (err) {
-        res.status(500).json({ error: (err as Error).message });
+        res.status(500).json({ error: clientSafeError(err) });
       }
     });
 
@@ -421,7 +421,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
               result = await runTool(d, tc.function.name, parsed, taskId);
             } catch (e) {
               const pe = e as { code?: string; message?: string };
-              result = { sqlstate: pe.code ?? 'error', error: pe.message ?? String(e) };
+              result = { sqlstate: clientSafeSqlstate(pe.code), error: clientSafeError(e) };
             }
             events.push({ tool: tc.function.name, args: parsed, result });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 3000) });
@@ -439,11 +439,12 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         });
         res.json({
           identity: actor,
-          reply: '(stopped after 5 steps)',
+          reply: FRIENDLY_COMPLETION_ERROR,
           tool_events: events,
           proposals: await listProposals(d, taskId),
         });
       } catch (err) {
+        const safeError = clientSafeError(err);
         await tryRecordTaskActivity(d, {
           taskId,
           userId: actor,

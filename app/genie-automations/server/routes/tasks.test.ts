@@ -66,6 +66,24 @@ function response() {
   return { res, state };
 }
 
+describe('error response shaping', () => {
+  it('logs raw exception details but returns only the generic client message', () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(clientSafeError(new Error('SQLSTATE GA003: private database details'))).toBe(GENERIC_SERVER_ERROR);
+    expect(log).toHaveBeenCalledWith('Request failed:', expect.any(Error));
+
+    log.mockRestore();
+  });
+
+  it('keeps only recognized database error codes', () => {
+    expect(clientSafeSqlstate('GA003')).toBe('GA003');
+    expect(clientSafeSqlstate('42501')).toBe('42501');
+    expect(clientSafeSqlstate('ECONNRESET')).toBe('error');
+    expect(clientSafeSqlstate({ internal: true })).toBe('error');
+  });
+});
+
 describe('task routes', () => {
   it('lists active demo tasks, including tasks the user could join', async () => {
     const task = { task_id: 'receivables-eu', role: 'owner', member_count: 1 };
