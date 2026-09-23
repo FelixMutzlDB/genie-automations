@@ -211,6 +211,8 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
+  const chatControllerRef = useRef<AbortController | null>(null);
+  const actionControllersRef = useRef(new Set<AbortController>());
 
   const selectedTask = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const ownTasks = tasks.filter((task) => task.role !== null);
@@ -220,12 +222,24 @@ export default function App() {
     [messagesByTask, selectedTaskId]
   );
 
-  const selectTask = useCallback((taskId: string) => {
-    selectedTaskIdRef.current = taskId;
-    setSelectedTaskId(taskId);
-    localStorage.setItem(STORAGE_KEY, taskId);
-    setPageError(null);
+  const abortTaskRequests = useCallback(() => {
+    chatControllerRef.current?.abort();
+    chatControllerRef.current = null;
+    for (const controller of actionControllersRef.current) controller.abort();
+    actionControllersRef.current.clear();
   }, []);
+
+  const selectTask = useCallback(
+    (taskId: string) => {
+      abortTaskRequests();
+      selectedTaskIdRef.current = taskId;
+      setSelectedTaskId(taskId);
+      setBusy(false);
+      localStorage.setItem(STORAGE_KEY, taskId);
+      setPageError(null);
+    },
+    [abortTaskRequests]
+  );
 
   const loadTasks = useCallback(
     async (preferredId?: string) => {
@@ -240,8 +254,10 @@ export default function App() {
         if (candidate && memberTasks.some((task) => task.task_id === candidate)) selectTask(candidate);
         else if (memberTasks[0]) selectTask(memberTasks[0].task_id);
         else {
+          abortTaskRequests();
           selectedTaskIdRef.current = null;
           setSelectedTaskId(null);
+          setBusy(false);
         }
       } catch {
         setPageError("We couldn't load your automations. Please try again.");
@@ -249,7 +265,7 @@ export default function App() {
         setTasksLoading(false);
       }
     },
-    [selectTask, selectedTaskId]
+    [abortTaskRequests, selectTask, selectedTaskId]
   );
 
   const refreshTaskViews = useCallback(async (taskId: string, signal?: AbortSignal) => {
@@ -274,6 +290,7 @@ export default function App() {
   useEffect(() => {
     void loadTasks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => abortTaskRequests(), [abortTaskRequests]);
   useEffect(() => {
     if (selectedTaskId) {
       const controller = new AbortController();
@@ -360,6 +377,9 @@ export default function App() {
     async (text: string) => {
       if (!text.trim() || busy || !selectedTaskId) return;
       const taskId = selectedTaskId;
+      const controller = new AbortController();
+      chatControllerRef.current?.abort();
+      chatControllerRef.current = controller;
       setInput('');
       setPageError(null);
       setBusy(true);
@@ -369,13 +389,14 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text, task_id: taskId }),
+          signal: controller.signal,
         });
         const data = (await response.json()) as ChatResponse;
-        const isCurrentTask = selectedTaskIdRef.current === taskId;
-        if (data.identity && isCurrentTask) setIdentity(data.identity);
-        if ((!response.ok || data.error) && isCurrentTask) {
+        if (controller.signal.aborted || selectedTaskIdRef.current !== taskId) return;
+        if (data.identity) setIdentity(data.identity);
+        if (!response.ok || data.error) {
           setPageError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
-        } else
+        } else {
           setMessagesByTask((all) => ({
             ...all,
             [taskId]: [
@@ -387,12 +408,17 @@ export default function App() {
               },
             ],
           }));
-        if (data.proposals && selectedTaskIdRef.current === taskId) setProposals(data.proposals);
-        await refreshTaskViews(taskId);
-      } catch {
-        if (selectedTaskIdRef.current === taskId) setPageError(FRIENDLY_CHAT_ERROR);
+        }
+        if (data.proposals) setProposals(data.proposals);
+        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) await refreshTaskViews(taskId);
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
+        setPageError(FRIENDLY_CHAT_ERROR);
       } finally {
-        setBusy(false);
+        if (chatControllerRef.current === controller) {
+          chatControllerRef.current = null;
+          if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) setBusy(false);
+        }
       }
     },
     [busy, refreshTaskViews, selectedTaskId]
@@ -401,13 +427,18 @@ export default function App() {
   const act = useCallback(
     async (kind: 'approve' | 'commit', proposal: Proposal) => {
       if (!selectedTaskId) return;
+      const taskId = selectedTaskId;
+      const controller = new AbortController();
+      actionControllersRef.current.add(controller);
       try {
         const response = await fetch(`/api/${kind}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ proposal_id: proposal.proposal_id, task_id: selectedTaskId }),
+          body: JSON.stringify({ proposal_id: proposal.proposal_id, task_id: taskId }),
+          signal: controller.signal,
         });
         const data = (await response.json()) as ActionResponse;
+        if (controller.signal.aborted || selectedTaskIdRef.current !== taskId) return;
         const outcome: Outcome = data.ok
           ? {
               kind: 'success',
@@ -416,9 +447,12 @@ export default function App() {
             }
           : { kind: 'error', message: friendlyError(data.sqlstate, FRIENDLY_ERROR) };
         setOutcomes((all) => ({ ...all, [proposal.proposal_id]: outcome }));
-        await refreshTaskViews(selectedTaskId);
-      } catch {
+        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) await refreshTaskViews(taskId);
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
         setOutcomes((all) => ({ ...all, [proposal.proposal_id]: { kind: 'error', message: FRIENDLY_ERROR } }));
+      } finally {
+        actionControllersRef.current.delete(controller);
       }
     },
     [refreshTaskViews, selectedTaskId]

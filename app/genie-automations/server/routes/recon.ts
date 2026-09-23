@@ -52,6 +52,11 @@ export function clientSafeError(error: unknown): string {
   return GENERIC_SERVER_ERROR;
 }
 
+export function clientSafeSqlstate(code: unknown): string {
+  if (typeof code !== 'string') return 'error';
+  return /^GA\d{3}$/.test(code) || /^[0-9A-Z]{5}$/.test(code) ? code : 'error';
+}
+
 // ── Tool implementations (all OBO, all read-only except stage_* which stages a
 //    PROPOSAL via the guarded stage_change proc — never a direct write) ────────
 function listTasks(): unknown {
@@ -429,7 +434,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
               result = await runTool(d, tc.function.name, parsed, taskId);
             } catch (e) {
               const pe = e as { code?: string; message?: string };
-              result = { sqlstate: pe.code ?? 'error', error: clientSafeError(e) };
+              result = { sqlstate: clientSafeSqlstate(pe.code), error: clientSafeError(e) };
             }
             events.push({ tool: tc.function.name, args: parsed, result });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 3000) });
@@ -500,9 +505,9 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
           action: 'approve',
           status: 'failure',
           proposalId: id,
-          detail: { sqlstate: pe.code ?? 'error', error: safeError },
+          detail: { sqlstate: clientSafeSqlstate(pe.code), error: safeError },
         });
-        res.json({ ok: false, sqlstate: pe.code ?? 'error', error: safeError });
+        res.json({ ok: false, sqlstate: clientSafeSqlstate(pe.code), error: safeError });
       }
     });
 
@@ -546,9 +551,9 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
           action: 'commit',
           status: 'failure',
           proposalId: id,
-          detail: { sqlstate: pe.code ?? 'error', error: safeError },
+          detail: { sqlstate: clientSafeSqlstate(pe.code), error: safeError },
         });
-        res.json({ ok: false, sqlstate: pe.code ?? 'error', error: safeError });
+        res.json({ ok: false, sqlstate: clientSafeSqlstate(pe.code), error: safeError });
       }
     });
   });

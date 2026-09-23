@@ -1,6 +1,6 @@
 import { Application, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import { clientSafeError, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
+import { clientSafeError, clientSafeSqlstate, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
 import { setupTaskRoutes } from './tasks';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -74,6 +74,13 @@ describe('error response shaping', () => {
     expect(log).toHaveBeenCalledWith('Request failed:', expect.any(Error));
 
     log.mockRestore();
+  });
+
+  it('keeps only recognized database error codes', () => {
+    expect(clientSafeSqlstate('GA003')).toBe('GA003');
+    expect(clientSafeSqlstate('42501')).toBe('42501');
+    expect(clientSafeSqlstate('ECONNRESET')).toBe('error');
+    expect(clientSafeSqlstate({ internal: true })).toBe('error');
   });
 });
 
