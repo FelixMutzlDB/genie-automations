@@ -410,7 +410,9 @@ export default function App() {
           }));
         }
         if (data.proposals) setProposals(data.proposals);
-        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) await refreshTaskViews(taskId);
+        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) {
+          await refreshTaskViews(taskId, controller.signal);
+        }
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
         setPageError(FRIENDLY_CHAT_ERROR);
@@ -447,7 +449,9 @@ export default function App() {
             }
           : { kind: 'error', message: friendlyError(data.sqlstate, FRIENDLY_ERROR) };
         setOutcomes((all) => ({ ...all, [proposal.proposal_id]: outcome }));
-        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) await refreshTaskViews(taskId);
+        if (!controller.signal.aborted && selectedTaskIdRef.current === taskId) {
+          await refreshTaskViews(taskId, controller.signal);
+        }
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
         setOutcomes((all) => ({ ...all, [proposal.proposal_id]: { kind: 'error', message: FRIENDLY_ERROR } }));
