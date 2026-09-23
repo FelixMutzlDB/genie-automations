@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { ingestGateFailure, safeExtension, sha256, uploadPath } from './ingest';
+import {
+  ingestGateFailure,
+  isAlreadyExists,
+  parseRunStatus,
+  safeExtension,
+  sha256,
+  uploadPath,
+  validCsvBytes,
+} from './ingest';
 
 describe('ingest upload identity', () => {
   it('hashes bytes and creates a server-owned relative path', () => {
@@ -14,6 +22,28 @@ describe('ingest upload identity', () => {
     expect(safeExtension('../../payload.js')).toBeNull();
     expect(safeExtension('macro.xlsm')).toBeNull();
   });
+
+  it('rejects binary CSV content while allowing UTF-8 and cp1252 text', () => {
+    expect(validCsvBytes(Buffer.from('name,amount\nCafé,10\n', 'utf8'))).toBe(true);
+    expect(validCsvBytes(Buffer.from([0x6e, 0x61, 0x6d, 0x65, 0x0a, 0x80, 0x2c, 0x31]))).toBe(true);
+    expect(validCsvBytes(Buffer.from([0x00, 0x01, 0x02, 0x03]))).toBe(false);
+  });
+
+  it('recognizes immutable-upload conflicts only', () => {
+    expect(isAlreadyExists(Object.assign(new Error('already exists'), { status: 409 }))).toBe(true);
+    expect(isAlreadyExists(new Error('permission denied'))).toBe(false);
+  });
+});
+
+describe('parse Job status', () => {
+  it.each([
+    [{ state: { life_cycle_state: 'PENDING' } }, 'pending'],
+    [{ state: { life_cycle_state: 'RUNNING' } }, 'running'],
+    [{ state: { life_cycle_state: 'TERMINATED', result_state: 'SUCCESS' } }, 'succeeded'],
+    [{ state: { life_cycle_state: 'TERMINATED', result_state: 'FAILED' } }, 'failed'],
+    [{ state: { life_cycle_state: 'TERMINATED', result_state: 'CANCELED' } }, 'failed'],
+    [{ state: { life_cycle_state: 'SKIPPED' } }, 'failed'],
+  ])('normalizes lifecycle and result state', (run, expected) => expect(parseRunStatus(run)).toBe(expected));
 });
 
 describe('ingest task gate', () => {

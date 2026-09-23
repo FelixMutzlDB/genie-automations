@@ -47,7 +47,15 @@ import {
 import { Bot, Plus, Send, ShieldCheck, User, Wrench } from 'lucide-react';
 import { TaskContext } from './TaskContext';
 import { humanizeActor, summarizeChange } from './lib/humanize';
-import { reduceIngest, type IngestUiState } from './lib/ingestState';
+import {
+  abortableDelay,
+  humanizeIngestReject,
+  isCurrentIngest,
+  reduceIngest,
+  type ActiveIngest,
+  type IngestUiState,
+  type PollStatus,
+} from './lib/ingestState';
 
 interface ToolEvent {
   tool: string;
@@ -227,6 +235,7 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const chatControllerRef = useRef<AbortController | null>(null);
+  const ingestRequestRef = useRef<ActiveIngest | null>(null);
   const actionControllersRef = useRef(new Set<AbortController>());
 
   const selectedTask = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
@@ -242,6 +251,8 @@ export default function App() {
     chatControllerRef.current = null;
     for (const controller of actionControllersRef.current) controller.abort();
     actionControllersRef.current.clear();
+    ingestRequestRef.current?.controller.abort();
+    ingestRequestRef.current = null;
   }, []);
 
   const selectTask = useCallback(
@@ -250,6 +261,9 @@ export default function App() {
       selectedTaskIdRef.current = taskId;
       setSelectedTaskId(taskId);
       setBusy(false);
+      setIngestOpen(false);
+      setIngestState({ phase: 'idle' });
+      setPreview(null);
       localStorage.setItem(STORAGE_KEY, taskId);
       setPageError(null);
     },
@@ -396,43 +410,63 @@ export default function App() {
 
   const uploadForPreview = useCallback(async (file: File) => {
     if (!selectedTask || !canIngest) return;
+    const taskId = selectedTask.task_id;
+    ingestRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const active: ActiveIngest = { controller, taskId };
+    ingestRequestRef.current = active;
+    const isCurrent = (parseId?: string) =>
+      selectedTaskIdRef.current === taskId && isCurrentIngest(ingestRequestRef.current, controller, taskId, parseId);
+    if (!isCurrent()) return;
     setPreview(null);
     setIngestState((state) => reduceIngest(state, { type: 'START' }));
     try {
-      const upload = await fetch(`/api/ingest/${encodeURIComponent(selectedTask.task_id)}/upload`, {
+      const upload = await fetch(`/api/ingest/${encodeURIComponent(taskId)}/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream', 'x-upload-filename': encodeURIComponent(file.name) },
         body: file,
+        signal: controller.signal,
       });
       const accepted = (await upload.json()) as { parse_id?: string; run_id?: number; error?: string };
+      if (!isCurrent()) return;
       if (!upload.ok || !accepted.parse_id || typeof accepted.run_id !== 'number') {
         throw new Error(accepted.error ?? 'We could not upload that file.');
       }
-      setIngestState((state) => reduceIngest(state, { type: 'ACCEPTED', parseId: accepted.parse_id!, runId: accepted.run_id! }));
+      const parseId = accepted.parse_id;
+      active.parseId = parseId;
+      if (!isCurrent(parseId)) return;
+      setIngestState((state) => reduceIngest(state, { type: 'ACCEPTED', parseId, runId: accepted.run_id! }));
 
       const started = Date.now();
       while (Date.now() - started < 120_000) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
-        const poll = await fetch(`/api/ingest/${encodeURIComponent(accepted.parse_id)}/poll`);
-        const status = (await poll.json()) as { status?: string; error?: string };
+        await abortableDelay(1500, controller.signal);
+        if (!isCurrent(parseId)) return;
+        const poll = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/poll`, { signal: controller.signal });
+        const status = (await poll.json()) as { status?: PollStatus; message?: string; error?: string };
+        if (!isCurrent(parseId)) return;
         if (!poll.ok || !status.status) throw new Error(status.error ?? 'We could not check the parser.');
         setIngestState((state) => reduceIngest(state, { type: 'POLL', status: status.status! }));
-        if (status.status === 'TERMINATED') {
-          const result = await fetch(`/api/ingest/${encodeURIComponent(accepted.parse_id)}/preview`);
+        if (status.status === 'succeeded') {
+          const result = await fetch(`/api/ingest/${encodeURIComponent(parseId)}/preview`, { signal: controller.signal });
           const parsed = (await result.json()) as ParsePreview & { error?: string };
+          if (!isCurrent(parseId)) return;
           if (!result.ok) throw new Error(parsed.error ?? 'The preview is not ready.');
           setPreview(parsed);
           setIngestState((state) => reduceIngest(state, { type: 'PREVIEW_READY' }));
           return;
         }
-        if (['INTERNAL_ERROR', 'SKIPPED', 'TERMINATING'].includes(status.status)) {
-          throw new Error('The parser could not finish safely.');
+        if (status.status === 'failed') {
+          throw new Error(status.message ?? 'The parser could not finish safely. Nothing was changed.');
         }
       }
       throw new Error('Parsing is taking longer than expected. You can close this window and try again.');
     } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return;
+      if (!isCurrent(active.parseId)) return;
       const message = error instanceof Error ? error.message : 'We could not create a preview.';
       setIngestState((state) => reduceIngest(state, { type: 'FAIL', message }));
+    } finally {
+      if (ingestRequestRef.current?.controller === controller) ingestRequestRef.current = null;
     }
   }, [canIngest, selectedTask]);
 
@@ -905,7 +939,18 @@ export default function App() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-          <Dialog open={ingestOpen} onOpenChange={setIngestOpen}>
+          <Dialog
+            open={ingestOpen}
+            onOpenChange={(open) => {
+              setIngestOpen(open);
+              if (!open) {
+                ingestRequestRef.current?.controller.abort();
+                ingestRequestRef.current = null;
+                setIngestState({ phase: 'idle' });
+                setPreview(null);
+              }
+            }}
+          >
             <DialogContent className="max-w-4xl max-h-[85vh] overflow-auto">
               <DialogHeader>
                 <DialogTitle>File parse preview</DialogTitle>
@@ -922,9 +967,10 @@ export default function App() {
                   {preview.warnings.map((warning) => <Alert key={warning}><AlertDescription>{warning}</AlertDescription></Alert>)}
                   {preview.rejected_rows.map((rejected) => (
                     <Alert key={`${rejected.code}-${rejected.source_row}`} variant="destructive">
-                      <AlertDescription>
-                        {rejected.code}: {rejected.guidance}{rejected.source_row ? ` (source row ${rejected.source_row})` : ''}
-                      </AlertDescription>
+                      <AlertDescription>{(() => {
+                        const friendly = humanizeIngestReject(rejected.code);
+                        return `${friendly.title}. ${friendly.guidance}${rejected.source_row ? ` Source row ${rejected.source_row}.` : ''}`;
+                      })()}</AlertDescription>
                     </Alert>
                   ))}
                   {preview.rows.length === 0 ? (

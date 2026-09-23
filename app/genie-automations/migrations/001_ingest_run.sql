@@ -14,4 +14,15 @@ CREATE TABLE IF NOT EXISTS genie_spike.ingest_run (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-GRANT SELECT, INSERT, UPDATE ON genie_spike.ingest_run TO alice, bob;
+-- Run with `psql -v ingest_app_role=<deployment-managed-app-role> ...`.
+-- Request-user roles receive no direct ingest_run privileges. The application
+-- identity owns immutable paths/digests/artifact references; it may update only
+-- Job lifecycle fields after insertion.
+REVOKE ALL ON genie_spike.ingest_run FROM PUBLIC;
+GRANT SELECT ON genie_spike.ingest_run TO :"ingest_app_role";
+GRANT INSERT (
+  parse_id, task_id, requested_by, volume_path, sha256,
+  parser_version, config_version, run_id, status, artifact_ref
+) ON genie_spike.ingest_run TO :"ingest_app_role";
+GRANT UPDATE (run_id, status, updated_at)
+  ON genie_spike.ingest_run TO :"ingest_app_role";
