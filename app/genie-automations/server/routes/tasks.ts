@@ -46,7 +46,7 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
       try {
         const result = await appkit.lakebase.asUser(req).query(
           `SELECT t.task_id, t.name, t.task_type, t.ingest_enabled,
-                  t.target_schema, t.target_table, t.org_id,
+                  t.target_catalog, t.target_schema, t.target_table, t.org_id,
                   tm.role,
                   COUNT(all_members.user_id)::int AS member_count
              FROM ${SCHEMA}.task t
@@ -55,7 +55,7 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
              LEFT JOIN ${SCHEMA}.task_member all_members ON all_members.task_id = t.task_id
             WHERE t.status = 'active' AND t.org_id = 'org-demo'
             GROUP BY t.task_id, t.name, t.task_type, t.ingest_enabled,
-                     t.target_schema, t.target_table, t.org_id, tm.role
+                     t.target_catalog, t.target_schema, t.target_table, t.org_id, tm.role
             ORDER BY t.created_at DESC`,
           [userId]
         );

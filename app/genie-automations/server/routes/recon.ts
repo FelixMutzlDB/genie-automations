@@ -464,7 +464,11 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
       let taskId: string | undefined;
       try {
         taskId = await taskIdForProposal(d, id);
-        if (taskId && !(await isTaskMember(d, taskId, actor))) {
+        if (!taskId) {
+          res.status(404).json({ ok: false, error: 'proposal not found' });
+          return;
+        }
+        if (!(await isTaskMember(d, taskId, actor))) {
           res.status(403).json({ ok: false, error: 'not a member of this task' });
           return;
         }
@@ -500,7 +504,11 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
       let taskId: string | undefined;
       try {
         taskId = await taskIdForProposal(d, id);
-        if (taskId && !(await isTaskMember(d, taskId, actor))) {
+        if (!taskId) {
+          res.status(404).json({ ok: false, error: 'proposal not found' });
+          return;
+        }
+        if (!(await isTaskMember(d, taskId, actor))) {
           res.status(403).json({ ok: false, error: 'not a member of this task' });
           return;
         }

@@ -24,6 +24,23 @@ function routeHarness(rows: Record<string, unknown>[] = []) {
   return { handlers, query };
 }
 
+function reconHarness(query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>) {
+  const handlers = new Map<string, Handler>();
+  const app = {
+    get(path: string, handler: Handler) {
+      handlers.set(`GET ${path}`, handler);
+    },
+    post(path: string, handler: Handler) {
+      handlers.set(`POST ${path}`, handler);
+    },
+  } as Application;
+  setupReconRoutes({
+    lakebase: { asUser: () => ({ query }) },
+    server: { extend: (register) => register(app) },
+  });
+  return handlers;
+}
+
 function request(overrides: Partial<Request> = {}): Request {
   return {
     body: {},
@@ -74,15 +91,36 @@ describe('task routes', () => {
     expect(state.body).toEqual({ ok: true, role: 'member' });
   });
 
-  it('records joined activity only for a newly inserted membership', async () => {
-    const { handlers, query } = routeHarness([{ task_id: 'vendor-bank-eu', role: 'member' }]);
-    const { res } = response();
+  it('records exactly one joined activity across repeated joins', async () => {
+    let isMember = false;
+    let joinedActivityInserts = 0;
+    const query = vi.fn((sql: string) => {
+      const insertedMembership = !isMember;
+      const activityUsesInsertedMembership = sql.includes("'joined', 'success' FROM joined");
+      if (activityUsesInsertedMembership ? insertedMembership : true) joinedActivityInserts += 1;
+      isMember = true;
+      return Promise.resolve({ rows: [{ task_id: 'vendor-bank-eu', role: 'member' }] });
+    });
+    const handlers = new Map<string, Handler>();
+    const app = {
+      get(path: string, handler: Handler) {
+        handlers.set(`GET ${path}`, handler);
+      },
+      post(path: string, handler: Handler) {
+        handlers.set(`POST ${path}`, handler);
+      },
+    } as Application;
+    setupTaskRoutes({
+      lakebase: { asUser: () => ({ query }) },
+      server: { extend: (register) => register(app) },
+    });
+    const handler = handlers.get('POST /api/tasks/:id/join');
 
-    await handlers.get('POST /api/tasks/:id/join')?.(request({ params: { id: 'vendor-bank-eu' } }), res);
+    await handler?.(request({ params: { id: 'vendor-bank-eu' } }), response().res);
+    await handler?.(request({ params: { id: 'vendor-bank-eu' } }), response().res);
 
-    const sql = String(query.mock.calls[0]?.[0]);
-    expect(sql).toContain("SELECT task_id, $1, 'joined', 'success' FROM joined");
-    expect(sql).not.toContain("SELECT task_id, $1, 'joined', 'success' FROM eligible");
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(joinedActivityInserts).toBe(1);
   });
 
   it('keeps an owner role when the owner calls join', async () => {
@@ -104,20 +142,8 @@ describe('task routes', () => {
   });
 
   it('rejects an unauthorized task_id before listing proposals', async () => {
-    const handlers = new Map<string, Handler>();
     const query = vi.fn().mockResolvedValue({ rows: [] });
-    const app = {
-      get(path: string, handler: Handler) {
-        handlers.set(`GET ${path}`, handler);
-      },
-      post(path: string, handler: Handler) {
-        handlers.set(`POST ${path}`, handler);
-      },
-    } as Application;
-    setupReconRoutes({
-      lakebase: { asUser: () => ({ query }) },
-      server: { extend: (register) => register(app) },
-    });
+    const handlers = reconHarness(query);
     const { res, state } = response();
 
     await handlers.get('GET /api/proposals')?.(request({ query: { task_id: 'other-org-task' } }), res);
@@ -125,5 +151,46 @@ describe('task routes', () => {
     expect(state.status).toBe(403);
     expect(state.body).toEqual({ ok: false, error: 'not a member of this task' });
     expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['/api/approve', '/api/commit'])('rejects missing proposals before guarded %s', async (path) => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const handlers = reconHarness(query);
+    const { res, state } = response();
+
+    await handlers.get(`POST ${path}`)?.(request({ body: { proposal_id: 'does-not-exist' } }), res);
+
+    expect(state.status).toBe(404);
+    expect(state.body).toEqual({ ok: false, error: 'proposal not found' });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(String(query.mock.calls[0]?.[0])).toContain('SELECT task_id');
+  });
+
+  it('rejects unauthorized task_id on chat before calling the model', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const handlers = reconHarness(query);
+    const { res, state } = response();
+
+    await handlers.get('POST /api/chat')?.(request({ body: { message: 'hello', task_id: 'other-org-task' } }), res);
+
+    expect(state.status).toBe(403);
+    expect(state.body).toEqual({ ok: false, error: 'not a member of this task' });
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['/api/approve', '/api/commit'])('rejects unauthorized proposals before guarded %s', async (path) => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ task_id: 'other-org-task' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const handlers = reconHarness(query);
+    const { res, state } = response();
+
+    await handlers.get(`POST ${path}`)?.(request({ body: { proposal_id: 'proposal-other-org' } }), res);
+
+    expect(state.status).toBe(403);
+    expect(state.body).toEqual({ ok: false, error: 'not a member of this task' });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls.some((call) => String(call[0]).includes(`${path.slice(5)}_change`))).toBe(false);
   });
 });
