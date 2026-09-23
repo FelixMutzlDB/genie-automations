@@ -66,17 +66,25 @@ INSERT INTO genie_spike.task_member(task_id, user_id, role, source) VALUES
     ('vendor-bank-eu', 'ops.alice@example.com', 'owner', 'prefilled')
 ON CONFLICT DO NOTHING;
 
--- Framework tables are non-money metadata, so the OBO caller roles may use
--- direct DML. Financial ledger writes remain restricted to guarded procedures.
+-- Framework tables are non-money metadata, but callers still receive only the
+-- exact SELECT/INSERT privileges used by the routes. Organization is
+-- admin-managed, and framework history/ownership cannot be rewritten.
+REVOKE INSERT, UPDATE, DELETE ON
+    genie_spike.organization, genie_spike.task,
+    genie_spike.task_member, genie_spike.task_activity
+FROM PUBLIC;
+
 DO $$
 DECLARE r TEXT;
 BEGIN
   FOREACH r IN ARRAY ARRAY['alice', 'bob'] LOOP
     EXECUTE format('GRANT USAGE ON SCHEMA genie_spike TO %I', r);
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE ON genie_spike.organization, genie_spike.task, '
-      'genie_spike.task_member, genie_spike.task_activity TO %I', r
-    );
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON genie_spike.organization, genie_spike.task, '
+                   'genie_spike.task_member, genie_spike.task_activity FROM %I', r);
+    EXECUTE format('GRANT SELECT ON genie_spike.organization, genie_spike.task, '
+                   'genie_spike.task_member, genie_spike.task_activity TO %I', r);
+    EXECUTE format('GRANT INSERT ON genie_spike.task, genie_spike.task_member, '
+                   'genie_spike.task_activity TO %I', r);
     EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE genie_spike.task_activity_activity_id_seq TO %I', r);
   END LOOP;
 END $$;

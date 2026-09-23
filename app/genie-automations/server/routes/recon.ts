@@ -156,6 +156,25 @@ async function listProposals(d: UserDb, taskId?: string): Promise<Record<string,
   return r.rows;
 }
 
+async function isTaskMember(d: UserDb, taskId: string, userId: string): Promise<boolean> {
+  const result = await d.query(
+    `SELECT 1
+       FROM ${SCHEMA}.task t
+       LEFT JOIN ${SCHEMA}.task_member tm
+         ON tm.task_id = t.task_id AND tm.user_id = $2
+      WHERE t.task_id = $1 AND (tm.user_id IS NOT NULL OR t.owner_id = $2)
+      LIMIT 1`,
+    [taskId, userId]
+  );
+  return Boolean(result.rows[0]);
+}
+
+async function taskIdForProposal(d: UserDb, proposalId: string): Promise<string | undefined> {
+  const result = await d.query(`SELECT task_id FROM ${SCHEMA}.proposed_changes WHERE proposal_id = $1`, [proposalId]);
+  const taskId = result.rows[0]?.['task_id'];
+  return typeof taskId === 'string' ? taskId : undefined;
+}
+
 async function recordTaskActivity(
   d: UserDb,
   input: {
@@ -183,15 +202,32 @@ async function tryRecordTaskActivity(d: UserDb, input: Parameters<typeof recordT
   }
 }
 
-function proposalIdFromEvents(events: ToolEvent[]): string | undefined {
+function proposalIdFromEvents(events: ToolEvent[], taskId?: string): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
-    const result = events[i]?.result;
+    const event = events[i];
+    const expectedTaskId =
+      event?.tool === 'stage_allocation_correction'
+        ? 'receivables-eu'
+        : event?.tool === 'stage_vendor_bank_update'
+          ? 'vendor-bank-eu'
+          : undefined;
+    if (!expectedTaskId || (taskId && expectedTaskId !== taskId)) continue;
+    const result = event.result;
     if (result && typeof result === 'object' && 'proposal_id' in result) {
       const proposalId = (result as { proposal_id?: unknown }).proposal_id;
       if (typeof proposalId === 'string') return proposalId;
     }
   }
   return undefined;
+}
+
+function toolOperationFailed(events: ToolEvent[]): boolean {
+  return events.some((event) => {
+    if (!event.result || typeof event.result !== 'object') return false;
+    if ('error' in event.result) return true;
+    if (!event.tool.startsWith('stage_')) return false;
+    return !('proposal_id' in event.result) || typeof event.result.proposal_id !== 'string';
+  });
 }
 
 // ── FM tool-loop (OBO: the FM is called with the user's forwarded token) ──────
@@ -288,7 +324,7 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
-async function runTool(d: UserDb, name: string, args: Record<string, unknown>): Promise<unknown> {
+async function runTool(d: UserDb, name: string, args: Record<string, unknown>, taskId?: string): Promise<unknown> {
   switch (name) {
     case 'list_tasks':
       return listTasks();
@@ -299,12 +335,14 @@ async function runTool(d: UserDb, name: string, args: Record<string, unknown>): 
     case 'get_proposal':
       return getProposal(d, String(args['proposal_id']));
     case 'stage_allocation_correction':
+      if (taskId && taskId !== 'receivables-eu') return { error: 'tool does not belong to the selected task' };
       return stageAllocationCorrection(d, {
         remittance_id: String(args['remittance_id']),
         allocation_id: String(args['allocation_id']),
         new_amount: Number(args['new_amount']),
       });
     case 'stage_vendor_bank_update':
+      if (taskId && taskId !== 'vendor-bank-eu') return { error: 'tool does not belong to the selected task' };
       return stageVendorBankUpdate(d, {
         vendor_id: String(args['vendor_id']),
         new_iban: String(args['new_iban']),
@@ -320,8 +358,13 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
   appkit.server.extend((app) => {
     app.get('/api/proposals', async (req: Request, res: Response) => {
       const taskId = typeof req.query.task_id === 'string' ? req.query.task_id : undefined;
+      const d = db(appkit, req);
       try {
-        res.json({ identity: actorOf(req), proposals: await listProposals(db(appkit, req), taskId) });
+        if (taskId && !(await isTaskMember(d, taskId, actorOf(req)))) {
+          res.status(403).json({ ok: false, error: 'not a member of this task' });
+          return;
+        }
+        res.json({ identity: actorOf(req), proposals: await listProposals(d, taskId) });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }
@@ -339,17 +382,22 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         { role: 'user', content: userMsg },
       ];
       try {
+        if (taskId && !(await isTaskMember(d, taskId, actor))) {
+          res.status(403).json({ ok: false, error: 'not a member of this task' });
+          return;
+        }
         for (let i = 0; i < 5; i++) {
           const msg = await callFm(req, messages);
           messages.push(msg);
           const toolCalls = (msg['tool_calls'] as ToolCall[] | undefined) ?? [];
           if (toolCalls.length === 0) {
-            const proposalId = proposalIdFromEvents(events);
+            const proposalId = proposalIdFromEvents(events, taskId);
+            const failed = toolOperationFailed(events);
             await tryRecordTaskActivity(d, {
               taskId,
               userId: actor,
               action: 'chat',
-              status: 'success',
+              status: failed ? 'failure' : 'success',
               proposalId,
               detail: { tool_count: events.length },
             });
@@ -370,7 +418,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
             }
             let result: unknown;
             try {
-              result = await runTool(d, tc.function.name, parsed);
+              result = await runTool(d, tc.function.name, parsed, taskId);
             } catch (e) {
               const pe = e as { code?: string; message?: string };
               result = { sqlstate: pe.code ?? 'error', error: pe.message ?? String(e) };
@@ -379,12 +427,13 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
             messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 3000) });
           }
         }
-        const proposalId = proposalIdFromEvents(events);
+        const proposalId = proposalIdFromEvents(events, taskId);
+        const failed = toolOperationFailed(events);
         await tryRecordTaskActivity(d, {
           taskId,
           userId: actor,
           action: 'chat',
-          status: 'success',
+          status: failed ? 'failure' : 'success',
           proposalId,
           detail: { tool_count: events.length, stopped_after_limit: true },
         });
@@ -400,7 +449,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
           userId: actor,
           action: 'chat',
           status: 'failure',
-          proposalId: proposalIdFromEvents(events),
+          proposalId: proposalIdFromEvents(events, taskId),
           detail: { error: (err as Error).message },
         });
         res.status(500).json({ identity: actor, error: (err as Error).message, tool_events: events });
@@ -408,12 +457,17 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
     });
 
     app.post('/api/approve', async (req: Request, res: Response) => {
-      const body = req.body as { proposal_id?: unknown; task_id?: unknown };
+      const body = req.body as { proposal_id?: unknown };
       const id = stringValue(body?.proposal_id);
-      const taskId = typeof body?.task_id === 'string' ? body.task_id : undefined;
       const actor = actorOf(req);
       const d = db(appkit, req);
+      let taskId: string | undefined;
       try {
+        taskId = await taskIdForProposal(d, id);
+        if (taskId && !(await isTaskMember(d, taskId, actor))) {
+          res.status(403).json({ ok: false, error: 'not a member of this task' });
+          return;
+        }
         const r = await d.query(`SELECT ${SCHEMA}.approve_change($1) AS result`, [id]);
         await tryRecordTaskActivity(d, {
           taskId,
@@ -439,12 +493,17 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
     });
 
     app.post('/api/commit', async (req: Request, res: Response) => {
-      const body = req.body as { proposal_id?: unknown; task_id?: unknown };
+      const body = req.body as { proposal_id?: unknown };
       const id = stringValue(body?.proposal_id);
-      const taskId = typeof body?.task_id === 'string' ? body.task_id : undefined;
       const actor = actorOf(req);
       const d = db(appkit, req);
+      let taskId: string | undefined;
       try {
+        taskId = await taskIdForProposal(d, id);
+        if (taskId && !(await isTaskMember(d, taskId, actor))) {
+          res.status(403).json({ ok: false, error: 'not a member of this task' });
+          return;
+        }
         const r = await d.query(`SELECT ${SCHEMA}.commit_change($1,$2,'user') AS result`, [id, actor]);
         const result = r.rows[0]?.['result'];
         const audit = await d.query(

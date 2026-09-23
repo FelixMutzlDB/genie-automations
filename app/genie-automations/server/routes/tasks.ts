@@ -19,6 +19,7 @@ interface AppKitOBO {
 interface CreateTaskBody {
   name?: unknown;
   task_type?: unknown;
+  target_catalog?: unknown;
   target_schema?: unknown;
   target_table?: unknown;
   ingest_enabled?: unknown;
@@ -44,22 +45,15 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
       const userId = actorOf(req);
       try {
         const result = await appkit.lakebase.asUser(req).query(
-          `WITH user_orgs AS (
-             SELECT DISTINCT t.org_id
-               FROM ${SCHEMA}.task t
-               LEFT JOIN ${SCHEMA}.task_member tm ON tm.task_id = t.task_id
-              WHERE tm.user_id = $1 OR t.owner_id = $1
-           )
-           SELECT t.task_id, t.name, t.task_type, t.ingest_enabled,
+          `SELECT t.task_id, t.name, t.task_type, t.ingest_enabled,
                   t.target_schema, t.target_table, t.org_id,
                   tm.role,
                   COUNT(all_members.user_id)::int AS member_count
              FROM ${SCHEMA}.task t
-             JOIN user_orgs uo ON uo.org_id = t.org_id
              LEFT JOIN ${SCHEMA}.task_member tm
                ON tm.task_id = t.task_id AND tm.user_id = $1
              LEFT JOIN ${SCHEMA}.task_member all_members ON all_members.task_id = t.task_id
-            WHERE t.status = 'active'
+            WHERE t.status = 'active' AND t.org_id = 'org-demo'
             GROUP BY t.task_id, t.name, t.task_type, t.ingest_enabled,
                      t.target_schema, t.target_table, t.org_id, tm.role
             ORDER BY t.created_at DESC`,
@@ -82,24 +76,20 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
 
       const userId = actorOf(req);
       const taskId = taskIdFor(name);
+      const targetCatalog = typeof body.target_catalog === 'string' ? body.target_catalog : null;
       const targetSchema = typeof body.target_schema === 'string' ? body.target_schema : null;
       const targetTable = typeof body.target_table === 'string' ? body.target_table : null;
       const ingestEnabled = typeof body.ingest_enabled === 'boolean' ? body.ingest_enabled : false;
       try {
         const result = await appkit.lakebase.asUser(req).query(
           `WITH selected_org AS (
-             SELECT t.org_id
-               FROM ${SCHEMA}.task t
-               LEFT JOIN ${SCHEMA}.task_member tm ON tm.task_id = t.task_id
-              WHERE tm.user_id = $1 OR t.owner_id = $1
-              ORDER BY t.created_at
-              LIMIT 1
+             SELECT org_id FROM ${SCHEMA}.organization WHERE org_id = 'org-demo'
            ), new_task AS (
              INSERT INTO ${SCHEMA}.task(
                task_id, org_id, name, task_type, owner_id,
-               target_schema, target_table, ingest_enabled
+               target_catalog, target_schema, target_table, ingest_enabled
              )
-             SELECT $2, org_id, $3, $4, $1, $5, $6, $7 FROM selected_org
+             SELECT $2, org_id, $3, $4, $1, $5, $6, $7, $8 FROM selected_org
              RETURNING *
            ), new_member AS (
              INSERT INTO ${SCHEMA}.task_member(task_id, user_id, role, source)
@@ -114,7 +104,7 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
            SELECT nt.*, 'owner'::text AS role, 1::int AS member_count
              FROM new_task nt
              JOIN new_member nm USING (task_id)`,
-          [userId, taskId, name, taskType, targetSchema, targetTable, ingestEnabled]
+          [userId, taskId, name, taskType, targetCatalog, targetSchema, targetTable, ingestEnabled]
         );
         if (!result.rows[0]) {
           res.status(403).json({ error: 'No organization is associated with the current user' });
@@ -130,16 +120,10 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
       const userId = actorOf(req);
       try {
         const result = await appkit.lakebase.asUser(req).query(
-          `WITH user_orgs AS (
-             SELECT DISTINCT t.org_id
-               FROM ${SCHEMA}.task t
-               LEFT JOIN ${SCHEMA}.task_member tm ON tm.task_id = t.task_id
-              WHERE tm.user_id = $1 OR t.owner_id = $1
-           ), eligible AS (
+          `WITH eligible AS (
              SELECT t.task_id
                FROM ${SCHEMA}.task t
-               JOIN user_orgs uo ON uo.org_id = t.org_id
-              WHERE t.task_id = $2 AND t.status = 'active'
+              WHERE t.task_id = $2 AND t.status = 'active' AND t.org_id = 'org-demo'
            ), joined AS (
              INSERT INTO ${SCHEMA}.task_member(task_id, user_id, role, source)
              SELECT task_id, $1, 'member', 'joined' FROM eligible
@@ -147,16 +131,19 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
              RETURNING task_id
            ), activity AS (
              INSERT INTO ${SCHEMA}.task_activity(task_id, user_id, action, status)
-             SELECT task_id, $1, 'joined', 'success' FROM eligible
+             SELECT task_id, $1, 'joined', 'success' FROM joined
            )
-           SELECT task_id FROM eligible`,
+           SELECT tm.task_id, tm.role
+             FROM ${SCHEMA}.task_member tm
+             JOIN eligible e ON e.task_id = tm.task_id
+            WHERE tm.user_id = $1`,
           [userId, req.params.id]
         );
         if (!result.rows[0]) {
           res.status(404).json({ error: 'Task not found in the current organization' });
           return;
         }
-        res.json({ ok: true, role: 'member' });
+        res.json({ ok: true, role: result.rows[0]['role'] });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }
