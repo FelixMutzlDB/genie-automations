@@ -35,7 +35,8 @@ def main():
             stmt = "ALTER" if exists else "CREATE"
             c.execute(f"{stmt} ROLE {role} LOGIN PASSWORD '{pw}'")
             print(f"role {role}: {'altered' if exists else 'created'}")
-        for f in ("01_schema.sql", "02_commit_change.sql", "02b_nolock_control.sql", "03_grants.sql"):
+        for f in ("01_schema.sql", "06_vendor_automation.sql", "02_commit_change.sql",
+                  "02b_nolock_control.sql", "03_grants.sql", "05_guarded_approval.sql"):
             run_batch(c, (SQLDIR / f).read_text())
             print(f"applied {f}")
     print("DEPLOY_OK")

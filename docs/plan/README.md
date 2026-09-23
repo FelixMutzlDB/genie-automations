@@ -54,6 +54,7 @@ independent red-team passes (27 consolidated findings, C-01…C-27).
 | [10-ratified-decisions.md](10-ratified-decisions.md) | Debby | Felix's ratified calls D1–D4 (period-lock B, vision-FM, owner dual-control, red-team order) |
 | [11-ui-ux-spec.md](11-ui-ux-spec.md) | Debby | **Genie-inspired UI** — ADR-006 (adopt AppKit/DuBois, *proposed/gated*), design principles, layout, component plan, safety-visibility non-negotiables, Arc 1/2/3 sequencing |
 | [12-design-tokens.md](12-design-tokens.md) | Debby | semantic delta layer — *consume DuBois, don't redefine*; pull-from-live list; `--sem-*` tokens; light-first |
+| [13-automation2-changelog.md](13-automation2-changelog.md) | Debby | **framework-thesis test** — vendor bank-detail (automation #2, materially different, no aggregate invariant); honest config/additive-capability/engine classification + L1/L2/L3 maturity verdict |
 
 ## Status / go-no-go
 
