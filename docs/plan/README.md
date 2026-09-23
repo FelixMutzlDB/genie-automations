@@ -40,6 +40,9 @@ independent red-team passes (27 consolidated findings, C-01…C-27).
 
 ## Contents
 
+> 📌 **Resuming in a fresh session? Start with [`../HANDOFF.md`](../HANDOFF.md)** —
+> current state of play, the live app URL, what's proven, open items, and how to pick up.
+
 | Doc | Owner | Content |
 |---|---|---|
 | [09-automation-model-and-glossary.md](09-automation-model-and-glossary.md) | Debby | **read first** — framework vs pilot, automation-owner, schedule/period as config, per-type roots; de-pilot-ification |
