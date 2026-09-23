@@ -8,9 +8,9 @@ variables:
     description: Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.
   postgres_project:
     description: Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.
-  uploads_volume:
-    description: Existing managed Unity Catalog Volume used for immutable uploads and parse previews.
-    default: /Volumes/felix_demo_catalog/genie-automations/raw_uploads
+  uploads_volume_full_name:
+    description: Three-level name of the existing Unity Catalog Volume used for immutable uploads and parse previews.
+    default: felix_demo_catalog.genie-automations.raw_uploads
 
 resources:
   apps:
@@ -40,7 +40,7 @@ resources:
         - name: uploads-volume
           uc_securable:
             securable_type: VOLUME
-            securable_full_name: ${var.uploads_volume}
+            securable_full_name: ${var.uploads_volume_full_name}
             permission: WRITE_VOLUME
         - name: parse-job
           job:
