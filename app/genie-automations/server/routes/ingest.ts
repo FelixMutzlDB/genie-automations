@@ -73,6 +73,14 @@ function isReceivablesTask(taskType: string): boolean {
   return taskType === 'reconciliation' || taskType === 'allocation_upsert' || taskType === 'receivables';
 }
 
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === '23505');
+}
+
+function auditUnattributedConfirmFailure(actor: string | null, reason: string): void {
+  console.warn('Ingest-confirm audit:', { actor: actor ?? 'unverified', status: 'failure', reason });
+}
+
 function canonicalArtifact(raw: string, parseId: string, configVersion: string): IngestArtifact {
   const artifact = z
     .object({
@@ -308,18 +316,35 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
       let taskId: string | undefined;
       let userDb: UserDb | undefined;
       try {
-        if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
-        const body = confirmSchema.parse(req.body);
-        const run = await appkit.lakebase.query(
-          `SELECT task_id, artifact_ref, config_version FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`,
-          [body.parse_id]
+        if (!actor) {
+          auditUnattributedConfirmFailure(null, 'missing_identity');
+          return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
+        }
+        userDb = appkit.lakebase.asUser(req);
+        const requestBody: unknown = req.body;
+        const candidateParseId = idSchema.safeParse(
+          requestBody !== null && typeof requestBody === 'object' && 'parse_id' in requestBody
+            ? requestBody.parse_id
+            : undefined
+        );
+        if (!candidateParseId.success) {
+          auditUnattributedConfirmFailure(actor, 'malformed_request');
+          return friendlyFailure(res, 400, 'We could not safely stage those rows. Nothing was changed.');
+        }
+        const run = await userDb.query(
+          `SELECT ir.task_id, ir.artifact_ref, ir.config_version
+             FROM ${SCHEMA}.ingest_run ir
+            WHERE ir.parse_id=$1 AND ir.requested_by=$2`,
+          [candidateParseId.data, actor]
         );
         const runRow = run.rows[0];
         taskId = typeof runRow?.['task_id'] === 'string' ? runRow['task_id'] : undefined;
-        if (!taskId)
+        if (!taskId) {
+          auditUnattributedConfirmFailure(actor, 'unknown_or_other_uploader_parse');
           return friendlyFailure(res, 404, 'That preview is no longer available. Please upload the file again.');
+        }
+        const body = confirmSchema.parse(req.body);
 
-        userDb = appkit.lakebase.asUser(req);
         const authorization = await userDb.query(
           `SELECT EXISTS (
              SELECT 1 FROM ${SCHEMA}.task_member tm WHERE tm.task_id=t.task_id AND tm.user_id=$2
@@ -405,16 +430,37 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           const diff = { remittance_id: remittanceId, allocations };
           stagedDiffs.push({ change_type: 'allocation_upsert', diff });
         }
-        // One SQL statement makes multi-remittance staging atomic while retaining the guarded procedure as the sole boundary.
-        const staged = await userDb.query(
-          `SELECT ${SCHEMA}.stage_change($1, item->>'change_type', $2, item->'diff') AS proposal_id
-             FROM jsonb_array_elements($3::jsonb) AS item`,
-          [taskId, configVersion, JSON.stringify(stagedDiffs)]
-        );
-        const proposalIds = staged.rows
-          .map((row) => row['proposal_id'])
-          .filter((id): id is string => typeof id === 'string');
-        if (proposalIds.length !== stagedDiffs.length) throw new Error('stage_change did not return every proposal');
+        const proposalIds: string[] = [];
+        const confirmDb = userDb;
+        for (const stagedDiff of stagedDiffs) {
+          const diffJson = JSON.stringify(stagedDiff.diff);
+          const findExisting = () =>
+            confirmDb.query(
+              `SELECT proposal_id FROM ${SCHEMA}.proposed_changes
+                WHERE task_id=$1 AND change_type=$2 AND config_version_hash=$3 AND diff=$4::jsonb
+                ORDER BY created_at LIMIT 1`,
+              [taskId, stagedDiff.change_type, configVersion, diffJson]
+            );
+          let existing = await findExisting();
+          let proposalId = existing.rows[0]?.['proposal_id'];
+          if (typeof proposalId !== 'string') {
+            try {
+              const staged = await confirmDb.query(`SELECT ${SCHEMA}.stage_change($1,$2,$3,$4::jsonb) AS proposal_id`, [
+                taskId,
+                stagedDiff.change_type,
+                configVersion,
+                diffJson,
+              ]);
+              proposalId = staged.rows[0]?.['proposal_id'];
+            } catch (error) {
+              if (!isUniqueViolation(error)) throw error;
+              existing = await findExisting();
+              proposalId = existing.rows[0]?.['proposal_id'];
+            }
+          }
+          if (typeof proposalId !== 'string') throw new Error('stage_change did not return a proposal');
+          proposalIds.push(proposalId);
+        }
         await recordConfirmActivity(userDb, { taskId, actor, status: 'success', proposalIds });
         res.status(201).json({ proposal_ids: proposalIds });
       } catch (error) {

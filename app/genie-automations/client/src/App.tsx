@@ -49,6 +49,7 @@ import { TaskContext } from './TaskContext';
 import { humanizeActor, summarizeChange } from './lib/humanize';
 import {
   abortableDelay,
+  claimConfirmation,
   closeIngestSession,
   humanizeIngestReject,
   isCurrentIngest,
@@ -234,11 +235,13 @@ export default function App() {
   const [ingestState, setIngestState] = useState<IngestUiState>({ phase: 'idle' });
   const [preview, setPreview] = useState<ParsePreview | null>(null);
   const [selectedPreviewRows, setSelectedPreviewRows] = useState<Set<number>>(new Set());
+  const [confirmSubmitting, setConfirmSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const chatControllerRef = useRef<AbortController | null>(null);
   const ingestRequestRef = useRef<ActiveIngest | null>(null);
+  const confirmSubmissionRef = useRef(false);
   const actionControllersRef = useRef(new Set<AbortController>());
 
   const selectedTask = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
@@ -256,6 +259,7 @@ export default function App() {
       clearPreview: () => setPreview(null),
     });
     setSelectedPreviewRows(new Set());
+    setConfirmSubmitting(false);
   }, []);
 
   const abortTaskRequests = useCallback(() => {
@@ -499,6 +503,8 @@ export default function App() {
     if (!selectedTask || !preview || !ingestState.parseId || selectedPreviewRows.size === 0) return;
     // TODO: stage_change must become task-type-aware before vendor-bank-detail ingest can be staged safely.
     if (!['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask.task_type)) return;
+    if (!claimConfirmation(confirmSubmissionRef)) return;
+    setConfirmSubmitting(true);
     const taskId = selectedTask.task_id;
     const parseId = ingestState.parseId;
     const controller = new AbortController();
@@ -533,6 +539,8 @@ export default function App() {
       );
     } finally {
       if (ingestRequestRef.current?.controller === controller) ingestRequestRef.current = null;
+      confirmSubmissionRef.current = false;
+      setConfirmSubmitting(false);
     }
   }, [ingestState.parseId, preview, refreshTaskViews, selectedPreviewRows, selectedTask]);
 
@@ -1139,7 +1147,10 @@ export default function App() {
                 </Button>
                 {ingestState.phase === 'preview' &&
                   ['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask?.task_type ?? '') && (
-                    <Button disabled={selectedPreviewRows.size === 0} onClick={() => void confirmPreview()}>
+                    <Button
+                    disabled={selectedPreviewRows.size === 0 || confirmSubmitting}
+                      onClick={() => void confirmPreview()}
+                    >
                       Confirm selected rows
                     </Button>
                   )}

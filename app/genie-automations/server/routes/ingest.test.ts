@@ -191,22 +191,36 @@ const CANONICAL_ARTIFACT = JSON.stringify({
   ],
 });
 
-function confirmHarness(task: Record<string, unknown>, options: { stageFails?: boolean } = {}) {
+function confirmHarness(
+  task: Record<string, unknown>,
+  options: { stageFails?: boolean; parseOwnedByCaller?: boolean; uniqueRace?: boolean } = {}
+) {
   const handlers = new Map<string, Handler>();
-  const appQuery = vi.fn().mockResolvedValue({
-    rows: [
-      {
-        task_id: 'receivables-eu',
-        artifact_ref: 'artifact.json',
-        config_version: 'receivables-v1',
-      },
-    ],
-  });
+  const appQuery = vi.fn().mockResolvedValue({ rows: [] });
+  let existingProposalId: string | undefined;
+  let raced = false;
   const userQuery = vi.fn((sql: string, _params?: unknown[]) => {
+    if (sql.includes('FROM genie_spike.ingest_run')) {
+      const owned = options.parseOwnedByCaller ?? true;
+      return Promise.resolve({
+        rows: owned
+          ? [{ task_id: 'receivables-eu', artifact_ref: 'artifact.json', config_version: 'receivables-v1' }]
+          : [],
+      });
+    }
     if (sql.includes('FROM genie_spike.task t')) return Promise.resolve({ rows: [task] });
     if (sql.includes('FROM genie_spike.allocation')) return Promise.resolve({ rows: [] });
+    if (sql.includes('FROM genie_spike.proposed_changes')) {
+      return Promise.resolve({ rows: existingProposalId ? [{ proposal_id: existingProposalId }] : [] });
+    }
     if (sql.includes('.stage_change(')) {
       if (options.stageFails) return Promise.reject(new Error('mock stage failure'));
+      if (options.uniqueRace && !raced) {
+        raced = true;
+        existingProposalId = 'p-upload';
+        return Promise.reject(Object.assign(new Error('duplicate idempotency key'), { code: '23505' }));
+      }
+      existingProposalId = 'p-upload';
       return Promise.resolve({ rows: [{ proposal_id: 'p-upload' }] });
     }
     return Promise.resolve({ rows: [] });
@@ -235,7 +249,7 @@ function confirmHarness(task: Record<string, unknown>, options: { stageFails?: b
   const req = request();
   req.params = {};
   req.body = { parse_id: PARSE_ID, selected_row_ids: [2] };
-  return { handlers, req, userQuery };
+  return { handlers, req, userQuery, appQuery };
 }
 
 const allowedTask = {
@@ -254,7 +268,28 @@ describe('ingest confirm route', () => {
     const { res, state } = response();
     await handlers.get('POST /api/ingest/confirm')?.(req, res);
     expect(state.status).toBe(400);
-    expect(userQuery).not.toHaveBeenCalled();
+    expect(userQuery).toHaveBeenCalledWith(expect.stringContaining('ir.requested_by=$2'), [
+      PARSE_ID,
+      'alice@example.com',
+    ]);
+    expect(userQuery).toHaveBeenCalledWith(
+      expect.stringContaining('task_activity'),
+      expect.arrayContaining(['failure'])
+    );
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
+  });
+
+  it('rejects a same-task parse uploaded by a different member', async () => {
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { parseOwnedByCaller: false });
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(404);
+    expect(userQuery).toHaveBeenCalledWith(expect.stringContaining('ir.requested_by=$2'), [
+      PARSE_ID,
+      'alice@example.com',
+    ]);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('FROM genie_spike.task t'))).toBe(false);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
   });
 
   it('refuses non-receivables tasks and records failure activity', async () => {
@@ -290,27 +325,41 @@ describe('ingest confirm route', () => {
     const stageCall = userQuery.mock.calls.find(([sql]) => String(sql).includes('.stage_change('));
     expect(stageCall?.[1]).toEqual([
       'receivables-eu',
+      'allocation_upsert',
       'receivables-v1',
-      JSON.stringify([
-        {
-          change_type: 'allocation_upsert',
-          diff: {
-            remittance_id: 'R-1',
-            allocations: [
-              {
-                allocation_id: `upload-${PARSE_ID}-2`,
-                invoice_id: 'INV-1',
-                amount: '10.00',
-              },
-            ],
+      JSON.stringify({
+        remittance_id: 'R-1',
+        allocations: [
+          {
+            allocation_id: `upload-${PARSE_ID}-2`,
+            invoice_id: 'INV-1',
+            amount: '10.00',
           },
-        },
-      ]),
+        ],
+      }),
     ]);
     expect(userQuery).toHaveBeenCalledWith(
       expect.stringContaining('task_activity'),
       expect.arrayContaining(['success'])
     );
+  });
+
+  it('returns the same proposal for retries and concurrent unique-key races', async () => {
+    const retry = confirmHarness(allowedTask);
+    const retryHandler = retry.handlers.get('POST /api/ingest/confirm');
+    const first = response();
+    const second = response();
+    await retryHandler?.(retry.req, first.res);
+    await retryHandler?.(retry.req, second.res);
+    expect(first.state.body).toEqual({ proposal_ids: ['p-upload'] });
+    expect(second.state.body).toEqual({ proposal_ids: ['p-upload'] });
+    expect(retry.userQuery.mock.calls.filter(([sql]) => String(sql).includes('.stage_change('))).toHaveLength(1);
+
+    const race = confirmHarness(allowedTask, { uniqueRace: true });
+    const raced = response();
+    await race.handlers.get('POST /api/ingest/confirm')?.(race.req, raced.res);
+    expect(raced.state.status).toBe(201);
+    expect(raced.state.body).toEqual({ proposal_ids: ['p-upload'] });
   });
 
   it('records failure activity when mocked stage_change fails', async () => {

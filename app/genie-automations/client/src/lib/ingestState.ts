@@ -67,6 +67,16 @@ export interface ActiveIngest {
   parseId?: string;
 }
 
+export interface ConfirmationLock {
+  current: boolean;
+}
+
+export function claimConfirmation(lock: ConfirmationLock): boolean {
+  if (lock.current) return false;
+  lock.current = true;
+  return true;
+}
+
 export interface CloseIngestActions {
   closeDialog(): void;
   resetState(): void;

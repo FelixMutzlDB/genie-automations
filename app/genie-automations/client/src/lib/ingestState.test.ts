@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   abortableDelay,
+  claimConfirmation,
   closeIngestSession,
   humanizeIngestReject,
   isCurrentIngest,
@@ -64,5 +65,13 @@ describe('ingest preview state machine', () => {
     const unknown = humanizeIngestReject('IG999');
     expect(`${known.title} ${known.guidance}`).not.toContain('IG016');
     expect(`${unknown.title} ${unknown.guidance}`).not.toContain('IG999');
+  });
+
+  it('allows only one client request when confirm is double-submitted synchronously', () => {
+    const lock = { current: false };
+    const request = vi.fn();
+    if (claimConfirmation(lock)) request();
+    if (claimConfirmation(lock)) request();
+    expect(request).toHaveBeenCalledOnce();
   });
 });
