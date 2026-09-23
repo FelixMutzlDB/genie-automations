@@ -51,6 +51,9 @@ independent red-team passes (27 consolidated findings, C-01…C-27).
 | [06-spike-specs.md](06-spike-specs.md) | write-path | Spike 1 (Lakebase commit) + Spike 2 (ingest) specs |
 | [07-seam-fixes-and-open-decisions.md](07-seam-fixes-and-open-decisions.md) | Debby | QC cross-review fixes (folded in) + the open decisions to ratify |
 | [08-period-lock-sweep-decision.md](08-period-lock-sweep-decision.md) | Debby | settled `contention_sweep()` design + decision rule (reconciliation-type; fan-in is a config/pilot input) |
+| [10-ratified-decisions.md](10-ratified-decisions.md) | Debby | Felix's ratified calls D1–D4 (period-lock B, vision-FM, owner dual-control, red-team order) |
+| [11-ui-ux-spec.md](11-ui-ux-spec.md) | Debby | **Genie-inspired UI** — ADR-006 (adopt AppKit/DuBois, *proposed/gated*), design principles, layout, component plan, safety-visibility non-negotiables, Arc 1/2/3 sequencing |
+| [12-design-tokens.md](12-design-tokens.md) | Debby | semantic delta layer — *consume DuBois, don't redefine*; pull-from-live list; `--sem-*` tokens; light-first |
 
 ## Status / go-no-go
 
