@@ -44,6 +44,17 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+const FRIENDLY_COMPLETION_ERROR = "I couldn't complete that — could you rephrase?";
+
+function clientSafeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^FM \d{3}:/.test(message) || message.includes('(stopped after 5 steps)')) {
+    console.error('Upstream assistant error:', message);
+    return FRIENDLY_COMPLETION_ERROR;
+  }
+  return message;
+}
+
 // ── Tool implementations (all OBO, all read-only except stage_* which stages a
 //    PROPOSAL via the guarded stage_change proc — never a direct write) ────────
 function listTasks(): unknown {
@@ -439,7 +450,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
         });
         res.json({
           identity: actor,
-          reply: '(stopped after 5 steps)',
+          reply: FRIENDLY_COMPLETION_ERROR,
           tool_events: events,
           proposals: await listProposals(d, taskId),
         });
@@ -452,7 +463,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
           proposalId: proposalIdFromEvents(events, taskId),
           detail: { error: (err as Error).message },
         });
-        res.status(500).json({ identity: actor, error: (err as Error).message, tool_events: events });
+        res.status(500).json({ identity: actor, error: clientSafeError(err), tool_events: events });
       }
     });
 

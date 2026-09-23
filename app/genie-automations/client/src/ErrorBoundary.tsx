@@ -1,6 +1,16 @@
 import React, { Component } from 'react';
 import type { ReactNode } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@databricks/appkit-ui/react';
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from '@databricks/appkit-ui/react';
 
 interface Props {
   children: ReactNode;
@@ -38,32 +48,26 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-background p-4">
-          <Card className="max-w-2xl mx-auto mt-8">
+        <div className="min-h-screen bg-background p-4 flex items-center justify-center">
+          <Card className="max-w-lg w-full">
             <CardHeader>
-              <CardTitle className="text-destructive">Application Error</CardTitle>
+              <CardTitle>Something went wrong</CardTitle>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div>
-                  <h3 className="font-semibold mb-2">Error Message:</h3>
-                  <pre className="bg-muted p-3 rounded text-sm overflow-auto">{this.state.error?.toString()}</pre>
-                </div>
-                {this.state.errorInfo && (
-                  <div>
-                    <h3 className="font-semibold mb-2">Component Stack:</h3>
-                    <pre className="bg-muted p-3 rounded text-sm overflow-auto">
-                      {this.state.errorInfo.componentStack}
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">Try reloading the page. Nothing you entered was changed.</p>
+              <Button onClick={() => window.location.reload()}>Reload</Button>
+              <Accordion type="single" collapsible>
+                <AccordionItem value="technical-details">
+                  <AccordionTrigger>Technical details</AccordionTrigger>
+                  <AccordionContent>
+                    <pre className="bg-muted p-3 rounded text-xs overflow-auto max-h-72 whitespace-pre-wrap">
+                      {[this.state.error?.toString(), this.state.errorInfo?.componentStack, this.state.error?.stack]
+                        .filter(Boolean)
+                        .join('\n\n')}
                     </pre>
-                  </div>
-                )}
-                {this.state.error?.stack && (
-                  <div>
-                    <h3 className="font-semibold mb-2">Stack Trace:</h3>
-                    <pre className="bg-muted p-3 rounded text-sm overflow-auto max-h-96">{this.state.error.stack}</pre>
-                  </div>
-                )}
-              </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </CardContent>
           </Card>
         </div>
