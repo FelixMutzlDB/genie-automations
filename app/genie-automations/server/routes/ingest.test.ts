@@ -193,13 +193,20 @@ const CANONICAL_ARTIFACT = JSON.stringify({
 
 function confirmHarness(
   task: Record<string, unknown>,
-  options: { stageFails?: boolean; parseOwnedByCaller?: boolean; uniqueRace?: boolean } = {}
+  options: {
+    stageFails?: boolean;
+    failStageAt?: number;
+    parseOwnedByCaller?: boolean;
+    uniqueRace?: boolean;
+    artifact?: string;
+  } = {}
 ) {
   const handlers = new Map<string, Handler>();
   const appQuery = vi.fn().mockResolvedValue({ rows: [] });
-  let existingProposalId: string | undefined;
+  const proposalsByDiff = new Map<unknown, string>();
   let raced = false;
-  const userQuery = vi.fn((sql: string, _params?: unknown[]) => {
+  let stageCalls = 0;
+  const userQuery = vi.fn((sql: string, params?: unknown[]) => {
     if (sql.includes('FROM genie_spike.ingest_run')) {
       const owned = options.parseOwnedByCaller ?? true;
       return Promise.resolve({
@@ -211,17 +218,21 @@ function confirmHarness(
     if (sql.includes('FROM genie_spike.task t')) return Promise.resolve({ rows: [task] });
     if (sql.includes('FROM genie_spike.allocation')) return Promise.resolve({ rows: [] });
     if (sql.includes('FROM genie_spike.proposed_changes')) {
+      const existingProposalId = proposalsByDiff.get(params?.[3]);
       return Promise.resolve({ rows: existingProposalId ? [{ proposal_id: existingProposalId }] : [] });
     }
     if (sql.includes('.stage_change(')) {
+      stageCalls += 1;
       if (options.stageFails) return Promise.reject(new Error('mock stage failure'));
+      if (options.failStageAt === stageCalls) return Promise.reject(new Error('mock later stage failure'));
       if (options.uniqueRace && !raced) {
         raced = true;
-        existingProposalId = 'p-upload';
+        proposalsByDiff.set(params?.[3], 'p-upload');
         return Promise.reject(Object.assign(new Error('duplicate idempotency key'), { code: '23505' }));
       }
-      existingProposalId = 'p-upload';
-      return Promise.resolve({ rows: [{ proposal_id: 'p-upload' }] });
+      const proposalId = stageCalls === 1 ? 'p-upload' : `p-upload-${stageCalls}`;
+      proposalsByDiff.set(params?.[3], proposalId);
+      return Promise.resolve({ rows: [{ proposal_id: proposalId }] });
     }
     return Promise.resolve({ rows: [] });
   });
@@ -239,7 +250,7 @@ function confirmHarness(
       asUser: () => ({
         exists: vi.fn(),
         upload: vi.fn(),
-        read: vi.fn().mockResolvedValue(CANONICAL_ARTIFACT),
+        read: vi.fn().mockResolvedValue(options.artifact ?? CANONICAL_ARTIFACT),
       }),
     }),
     jobs: () => ({ runNow: vi.fn(), getRun: vi.fn(), getRunOutput: vi.fn() }),
@@ -370,6 +381,33 @@ describe('ingest confirm route', () => {
     expect(userQuery).toHaveBeenCalledWith(
       expect.stringContaining('task_activity'),
       expect.arrayContaining(['failure'])
+    );
+  });
+
+  it('reports proposal ids and logs the truthful outcome when a later remittance fails', async () => {
+    const artifact = JSON.stringify({
+      parse_id: PARSE_ID,
+      config_version: 'receivables-v1',
+      status: 'ready',
+      rows: [
+        { source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } },
+        { source_row: 3, values: { remittance_id: 'R-2', invoice_id: 'INV-2', amount: '20.00' } },
+      ],
+    });
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { artifact, failStageAt: 2 });
+    req.body = { parse_id: PARSE_ID, selected_row_ids: [2, 3] };
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(207);
+    expect(state.body).toEqual({
+      proposal_ids: ['p-upload'],
+      partial: true,
+      message:
+        'Some selected rows were staged for review, but the rest could not be staged. You can safely retry to finish the remaining rows.',
+    });
+    expect(userQuery).toHaveBeenCalledWith(
+      expect.stringContaining('task_activity'),
+      expect.arrayContaining(['failure', expect.stringContaining('partially_staged'), 'p-upload'])
     );
   });
 

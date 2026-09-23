@@ -522,11 +522,11 @@ export default function App() {
         body: JSON.stringify({ parse_id: parseId, selected_row_ids: [...selectedPreviewRows].sort((a, b) => a - b) }),
         signal: controller.signal,
       });
-      const result = (await response.json()) as { proposal_ids?: string[]; error?: string };
+      const result = (await response.json()) as { proposal_ids?: string[]; error?: string; message?: string };
       if (!isCurrent()) return;
       if (!response.ok || !result.proposal_ids?.length)
         throw new Error(result.error ?? 'We could not stage those rows.');
-      setIngestState((state) => reduceIngest(state, { type: 'STAGED' }));
+      setIngestState((state) => reduceIngest(state, { type: 'STAGED', message: result.message }));
       await refreshTaskViews(taskId, controller.signal);
     } catch (error) {
       if (controller.signal.aborted || isAbortError(error) || !isCurrent()) return;
@@ -1045,8 +1045,8 @@ export default function App() {
               {ingestState.phase === 'staged' && (
                 <Alert>
                   <AlertDescription>
-                    Staged for review. The proposals are now available in the Proposals panel for another person to
-                    approve.
+                    {ingestState.message ??
+                      'Staged for review. The proposals are now available in the Proposals panel for another person to approve.'}
                   </AlertDescription>
                 </Alert>
               )}
@@ -1148,7 +1148,7 @@ export default function App() {
                 {ingestState.phase === 'preview' &&
                   ['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask?.task_type ?? '') && (
                     <Button
-                    disabled={selectedPreviewRows.size === 0 || confirmSubmitting}
+                      disabled={selectedPreviewRows.size === 0 || confirmSubmitting}
                       onClick={() => void confirmPreview()}
                     >
                       Confirm selected rows

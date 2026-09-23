@@ -122,7 +122,7 @@ async function recordConfirmActivity(
         JSON.stringify(
           input.status === 'success'
             ? { proposal_count: input.proposalIds?.length ?? 0 }
-            : { reason: input.reason ?? 'confirmation_failed' }
+            : { reason: input.reason ?? 'confirmation_failed', proposal_count: input.proposalIds?.length ?? 0 }
         ),
         input.proposalIds?.length === 1 ? input.proposalIds[0] : null,
       ]
@@ -315,6 +315,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
       const actor = actorOf(req);
       let taskId: string | undefined;
       let userDb: UserDb | undefined;
+      const proposalIds: string[] = [];
       try {
         if (!actor) {
           auditUnattributedConfirmFailure(null, 'missing_identity');
@@ -430,7 +431,6 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           const diff = { remittance_id: remittanceId, allocations };
           stagedDiffs.push({ change_type: 'allocation_upsert', diff });
         }
-        const proposalIds: string[] = [];
         const confirmDb = userDb;
         for (const stagedDiff of stagedDiffs) {
           const diffJson = JSON.stringify(stagedDiff.diff);
@@ -465,7 +465,24 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         res.status(201).json({ proposal_ids: proposalIds });
       } catch (error) {
         if (taskId && actor && userDb) {
-          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'confirmation_failed' });
+          const partial = proposalIds.length > 0;
+          await recordConfirmActivity(userDb, {
+            taskId,
+            actor,
+            status: 'failure',
+            reason: partial ? 'partially_staged' : 'confirmation_failed',
+            proposalIds,
+          });
+          if (partial) {
+            console.error('Ingest confirm partially failed:', error);
+            res.status(207).json({
+              proposal_ids: proposalIds,
+              partial: true,
+              message:
+                'Some selected rows were staged for review, but the rest could not be staged. You can safely retry to finish the remaining rows.',
+            });
+            return;
+          }
         }
         console.error('Ingest confirm failed:', error);
         const status = error instanceof z.ZodError ? 400 : 409;

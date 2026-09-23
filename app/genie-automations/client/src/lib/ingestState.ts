@@ -15,7 +15,7 @@ export type IngestEvent =
   | { type: 'POLL'; status: PollStatus }
   | { type: 'PREVIEW_READY' }
   | { type: 'CONFIRM' }
-  | { type: 'STAGED' }
+  | { type: 'STAGED'; message?: string }
   | { type: 'FAIL'; message: string }
   | { type: 'RESET' };
 
@@ -35,7 +35,7 @@ export function reduceIngest(state: IngestUiState, event: IngestEvent): IngestUi
     case 'CONFIRM':
       return { ...state, phase: 'confirming' };
     case 'STAGED':
-      return { ...state, phase: 'staged' };
+      return { ...state, phase: 'staged', message: event.message };
     case 'FAIL':
       return { ...state, phase: 'error', message: event.message };
     case 'RESET':
