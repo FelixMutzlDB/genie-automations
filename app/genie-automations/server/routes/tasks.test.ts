@@ -1,6 +1,6 @@
 import { Application, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import { setupReconRoutes } from './recon';
+import { clientSafeError, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
 import { setupTaskRoutes } from './tasks';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -65,6 +65,17 @@ function response() {
   } as Response;
   return { res, state };
 }
+
+describe('error response shaping', () => {
+  it('logs raw exception details but returns only the generic client message', () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(clientSafeError(new Error('SQLSTATE GA003: private database details'))).toBe(GENERIC_SERVER_ERROR);
+    expect(log).toHaveBeenCalledWith('Request failed:', expect.any(Error));
+
+    log.mockRestore();
+  });
+});
 
 describe('task routes', () => {
   it('lists active demo tasks, including tasks the user could join', async () => {

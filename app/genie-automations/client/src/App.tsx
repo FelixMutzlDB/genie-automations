@@ -87,6 +87,7 @@ interface ChatResponse {
   tool_events?: ToolEvent[];
   proposals?: Proposal[];
   error?: string;
+  sqlstate?: string;
 }
 interface ActionResponse {
   ok: boolean;
@@ -113,6 +114,7 @@ const GA_HELP: Record<string, string> = {
   '42501': "You don't have permission to make this change directly.",
 };
 const FRIENDLY_ERROR = 'Something went wrong applying that change. Nothing was changed.';
+const FRIENDLY_CHAT_ERROR = "I couldn't complete that — could you rephrase?";
 const SUGGESTIONS = ['List the remittances', 'Correct allocation A-2 on RDEMO-1 to 1150', 'Show vendors'];
 const ACTIVITY_LABELS: Record<string, string> = {
   chat: 'Asked the co-worker',
@@ -178,6 +180,14 @@ function appliedMessage(proposal: Proposal): string {
   return `Applied — ${target}, recorded under your name.`;
 }
 
+function friendlyError(code: unknown, fallback: string): string {
+  return typeof code === 'string' && GA_HELP[code] ? GA_HELP[code] : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 export default function App() {
   const [identity, setIdentity] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -200,6 +210,7 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const selectedTaskIdRef = useRef(selectedTaskId);
 
   const selectedTask = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const ownTasks = tasks.filter((task) => task.role !== null);
@@ -210,6 +221,7 @@ export default function App() {
   );
 
   const selectTask = useCallback((taskId: string) => {
+    selectedTaskIdRef.current = taskId;
     setSelectedTaskId(taskId);
     localStorage.setItem(STORAGE_KEY, taskId);
     setPageError(null);
@@ -227,7 +239,10 @@ export default function App() {
         const candidate = preferredId ?? selectedTaskId;
         if (candidate && memberTasks.some((task) => task.task_id === candidate)) selectTask(candidate);
         else if (memberTasks[0]) selectTask(memberTasks[0].task_id);
-        else setSelectedTaskId(null);
+        else {
+          selectedTaskIdRef.current = null;
+          setSelectedTaskId(null);
+        }
       } catch {
         setPageError("We couldn't load your automations. Please try again.");
       } finally {
@@ -237,19 +252,21 @@ export default function App() {
     [selectTask, selectedTaskId]
   );
 
-  const refreshTaskViews = useCallback(async (taskId: string) => {
+  const refreshTaskViews = useCallback(async (taskId: string, signal?: AbortSignal) => {
     try {
       const [proposalResponse, activityResponse] = await Promise.all([
-        fetch(`/api/proposals?task_id=${encodeURIComponent(taskId)}`),
-        fetch(`/api/tasks/${encodeURIComponent(taskId)}/activity`),
+        fetch(`/api/proposals?task_id=${encodeURIComponent(taskId)}`, { signal }),
+        fetch(`/api/tasks/${encodeURIComponent(taskId)}/activity`, { signal }),
       ]);
       if (!proposalResponse.ok || !activityResponse.ok) throw new Error('task views');
       const proposalData = (await proposalResponse.json()) as ChatResponse;
       const activityData = (await activityResponse.json()) as Activity[];
+      if (signal?.aborted || selectedTaskIdRef.current !== taskId) return;
       if (proposalData.identity) setIdentity(proposalData.identity);
       setProposals(proposalData.proposals ?? []);
       setActivity(activityData);
-    } catch {
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
       setPageError("We couldn't refresh this automation. Please try again.");
     }
   }, []);
@@ -258,11 +275,15 @@ export default function App() {
     void loadTasks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (selectedTaskId) void refreshTaskViews(selectedTaskId);
-    else {
+    if (selectedTaskId) {
+      const controller = new AbortController();
+      void refreshTaskViews(selectedTaskId, controller.signal);
+      return () => controller.abort();
+    } else {
       setProposals([]);
       setActivity([]);
     }
+    return undefined;
   }, [refreshTaskViews, selectedTaskId]);
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
@@ -350,24 +371,26 @@ export default function App() {
           body: JSON.stringify({ message: text, task_id: taskId }),
         });
         const data = (await response.json()) as ChatResponse;
-        if (data.identity) setIdentity(data.identity);
-        if (!response.ok || data.error) setPageError(data.error || "I couldn't complete that — could you rephrase?");
-        else
+        const isCurrentTask = selectedTaskIdRef.current === taskId;
+        if (data.identity && isCurrentTask) setIdentity(data.identity);
+        if ((!response.ok || data.error) && isCurrentTask) {
+          setPageError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
+        } else
           setMessagesByTask((all) => ({
             ...all,
             [taskId]: [
               ...(all[taskId] ?? [START_MESSAGE]),
               {
                 role: 'co-worker',
-                text: data.reply || "I couldn't complete that — could you rephrase?",
+                text: data.reply || FRIENDLY_CHAT_ERROR,
                 events: data.tool_events,
               },
             ],
           }));
-        if (data.proposals) setProposals(data.proposals);
+        if (data.proposals && selectedTaskIdRef.current === taskId) setProposals(data.proposals);
         await refreshTaskViews(taskId);
       } catch {
-        setPageError("I couldn't complete that — could you rephrase?");
+        if (selectedTaskIdRef.current === taskId) setPageError(FRIENDLY_CHAT_ERROR);
       } finally {
         setBusy(false);
       }
@@ -391,7 +414,7 @@ export default function App() {
               message: kind === 'commit' ? appliedMessage(proposal) : 'Approved — this change is ready to apply.',
               technical: data.audit,
             }
-          : { kind: 'error', message: (data.sqlstate && GA_HELP[data.sqlstate]) || FRIENDLY_ERROR };
+          : { kind: 'error', message: friendlyError(data.sqlstate, FRIENDLY_ERROR) };
         setOutcomes((all) => ({ ...all, [proposal.proposal_id]: outcome }));
         await refreshTaskViews(selectedTaskId);
       } catch {
@@ -704,9 +727,9 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Type</Label>
+                  <Label htmlFor="automation-type">Type</Label>
                   <Select value={createType} onValueChange={setCreateType}>
-                    <SelectTrigger>
+                    <SelectTrigger id="automation-type">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
