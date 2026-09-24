@@ -71,7 +71,6 @@ export async function extractImage(
           ],
         },
       ],
-      response_format: { type: 'json_object' },
       max_tokens: 4096,
     }),
   });

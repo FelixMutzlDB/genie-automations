@@ -76,5 +76,8 @@ describe('image extraction financial gates', () => {
       'https://example.databricks.com/serving-endpoints/configured-vision-endpoint/invocations',
       expect.any(Object)
     );
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(typeof request.body).toBe('string');
+    expect(JSON.parse(request.body as string)).not.toHaveProperty('response_format');
   });
 });
