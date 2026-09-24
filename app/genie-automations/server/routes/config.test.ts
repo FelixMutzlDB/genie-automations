@@ -71,9 +71,14 @@ describe('config governance database contract', () => {
   it('requires admin principals and destination allowlists at deploy time', () => {
     const appYaml = readFileSync(new URL('../../app.yaml', import.meta.url), 'utf8');
     const bundle = readFileSync(new URL('../../databricks.yml', import.meta.url), 'utf8');
-    expect(appYaml).not.toContain('CONFIG_ADMIN_PRINCIPALS');
+    expect(appYaml).toContain('name: LAKEBASE_ENDPOINT\n    valueFrom: postgres');
+    expect(appYaml).toContain('name: DATABRICKS_VOLUME_FILES\n    valueFrom: files');
+    expect(appYaml).toContain('name: DATABRICKS_JOB_ID\n    valueFrom: job');
+    expect(appYaml).toContain('name: CONFIG_ADMIN_PRINCIPALS\n    value: ${var.config_admin_principals}');
+    expect(appYaml).toContain('name: CONFIG_DESTINATION_ALLOWLIST\n    value: ${var.config_destination_allowlist}');
     expect(bundle).toMatch(/config_admin_principals:\n\s+description:[^\n]+\n\s+config_destination_allowlist:/);
     expect(bundle).toMatch(/config_destination_allowlist:\n\s+description:[^\n]+\n\nresources:/);
+    expect(bundle).not.toMatch(/\n\s+config:\n\s+env:/);
     expect(bundle).not.toContain('felix.mutzl@databricks.com');
   });
 });

@@ -33,12 +33,6 @@ resources:
         - postgres
         - serving.serving-endpoints
         - files.files
-      config:
-        env:
-          - name: CONFIG_ADMIN_PRINCIPALS
-            value: ${var.config_admin_principals}
-          - name: CONFIG_DESTINATION_ALLOWLIST
-            value: ${var.config_destination_allowlist}
 
       # The resources which this app has access to.
       resources:
