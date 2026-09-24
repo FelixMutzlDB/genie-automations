@@ -29,6 +29,79 @@ describe('image extraction financial gates', () => {
     else expect(validateMoney(raw)).toBe(expected);
   });
 
+  it('treats a null stated total as absent while re-validating row money', async () => {
+    process.env['IMAGE_EXTRACTION_ENDPOINT'] = 'configured-vision-endpoint';
+    process.env['DATABRICKS_HOST'] = 'example.databricks.com';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  rows: [{ remittance_id: 'R1', invoice_id: 'I1', amount: '1,234.56' }],
+                  stated_total: null,
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      )
+    );
+    const req = {
+      header: (name: string) => (name === 'x-forwarded-access-token' ? 'obo-token' : undefined),
+    } as Request;
+
+    const artifact = await extractImage(
+      req,
+      {
+        raw: Buffer.from('image'),
+        mimeType: 'image/png',
+        parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264',
+        configVersion: 'v1',
+        sha256: 'a'.repeat(64),
+      },
+      fetchMock
+    );
+
+    expect(artifact).toMatchObject({
+      status: 'ready',
+      rows: [{ values: { amount: '1234.56' } }],
+      rejected_rows: [],
+    });
+  });
+
+  it('fails closed on a non-success endpoint response before parsing model money', async () => {
+    process.env['IMAGE_EXTRACTION_ENDPOINT'] = 'configured-vision-endpoint';
+    process.env['DATABRICKS_HOST'] = 'example.databricks.com';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ rows: [{ amount: '10.00' }] }) } }],
+        }),
+        { status: 503 }
+      )
+    );
+    const req = {
+      header: (name: string) => (name === 'x-forwarded-access-token' ? 'obo-token' : undefined),
+    } as Request;
+
+    await expect(
+      extractImage(
+        req,
+        {
+          raw: Buffer.from('image'),
+          mimeType: 'image/png',
+          parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264',
+          configVersion: 'v1',
+          sha256: 'a'.repeat(64),
+        },
+        fetchMock
+      )
+    ).rejects.toThrow('image extraction failed (503)');
+  });
+
   it('returns only typed review data and performs no staging call', async () => {
     process.env['IMAGE_EXTRACTION_ENDPOINT'] = 'configured-vision-endpoint';
     process.env['DATABRICKS_HOST'] = 'example.databricks.com';
