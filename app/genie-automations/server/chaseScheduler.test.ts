@@ -10,7 +10,10 @@ describe('scheduled chase evaluation', () => {
     expect(migration).toContain("status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending'))");
     expect(migration).toContain("transport_adapter TEXT NOT NULL DEFAULT 'noop' CHECK (transport_adapter = 'noop')");
     expect(scheduler).toContain('class NoOpTransport');
-    expect(scheduler).not.toMatch(/requests\.|sendgrid|smtp|sql.alert|email/i);
+    expect(scheduler.match(/selected_transport\.deliver\(/g)).toHaveLength(1);
+    const noOpBody = scheduler.match(/class NoOpTransport:[^]*?(?=\n\ndef )/)?.[0] ?? '';
+    expect(noOpBody.match(/genie_spike\.[a-z_]+/g)).toEqual(['genie_spike.mark_chase_noop']);
+    expect(scheduler).not.toMatch(/\b(?:email|sendgrid|smtp|smtplib|sql[_. -]?alert|webhook|requests|urllib|httpx?)\b/i);
   });
 
   it('deduplicates once per offset crossing and updates last_notified only after insert', () => {
@@ -25,11 +28,14 @@ describe('scheduled chase evaluation', () => {
     expect(migration).not.toMatch(/GRANT (?:SELECT|INSERT|UPDATE|DELETE).*TO :"scheduler_role"/);
   });
 
-  it('adds an unpaused variable-driven job without changing projection scheduling', () => {
+  it('deploys the scheduler paused without changing the unpaused projection schedule', () => {
     expect(bundle).toContain('quartz_cron_expression: ${var.chase_scheduler_cron}');
     expect(bundle).toContain('service_principal_name: ${var.chase_scheduler_sp}');
     const projection = bundle.split('publish_receivables_projection:', 2)[1]?.split('chase_scheduler:', 1)[0] ?? '';
+    const chase = bundle.split('chase_scheduler:', 2)[1]?.split('targets:', 1)[0] ?? '';
     expect(projection).toContain("quartz_cron_expression: '0 0/5 * * * ?'");
     expect(projection).toContain('pause_status: UNPAUSED');
+    expect(chase).toContain('pause_status: PAUSED');
+    expect(chase).not.toContain('pause_status: UNPAUSED');
   });
 });

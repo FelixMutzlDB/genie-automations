@@ -151,7 +151,7 @@ resources:
       schedule:
         quartz_cron_expression: ${var.chase_scheduler_cron}
         timezone_id: UTC
-        pause_status: UNPAUSED
+        pause_status: PAUSED
       tasks:
         - task_key: evaluate_chase_reminders
           spark_python_task:
