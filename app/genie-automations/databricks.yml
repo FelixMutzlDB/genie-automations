@@ -29,6 +29,8 @@ variables:
   projection_postgres_database_name:
     description: PostgreSQL database name read by the projection publisher.
     default: databricks_postgres
+  projection_publisher_sp:
+    description: Dedicated service principal application ID that runs the projection publisher. Required; do not use the app service principal.
 
 resources:
   apps:
@@ -93,6 +95,8 @@ resources:
     publish_receivables_projection:
       name: '[${bundle.target}] genie-automations-publish-receivables-projection'
       description: Publishes a governed Lakebase receivables snapshot and its read-only Genie view.
+      run_as:
+        service_principal_name: ${var.projection_publisher_sp}
       schedule:
         quartz_cron_expression: '0 0/5 * * * ?'
         timezone_id: UTC

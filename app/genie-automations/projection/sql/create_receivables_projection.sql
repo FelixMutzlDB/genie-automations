@@ -6,7 +6,6 @@ COMMENT 'Committed receivables and allocation state copied from Lakebase. One ro
 AS
 SELECT
   remittance_reference,
-  subsidiary,
   accounting_period,
   remittance_amount,
   invoice_reference,

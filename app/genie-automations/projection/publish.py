@@ -13,7 +13,6 @@ from pyspark.sql import SparkSession, types as T
 SOURCE_SQL = """
 SELECT
   r.remittance_id AS remittance_reference,
-  r.subsidiary_id AS subsidiary,
   r.period AS accounting_period,
   r.total_amount AS remittance_amount,
   a.invoice_id AS invoice_reference,
@@ -41,7 +40,6 @@ ORDER BY r.remittance_id, a.invoice_id
 SNAPSHOT_SCHEMA = T.StructType(
     [
         T.StructField("remittance_reference", T.StringType(), False),
-        T.StructField("subsidiary", T.StringType(), False),
         T.StructField("accounting_period", T.StringType(), False),
         T.StructField("remittance_amount", T.DecimalType(18, 2), False),
         T.StructField("invoice_reference", T.StringType(), True),
@@ -89,7 +87,7 @@ def main() -> None:
 
     normalized = [
         tuple(
-            Decimal(value) if index in {3, 5, 6, 7} and value is not None else value
+            Decimal(value) if index in {2, 4, 5, 6} and value is not None else value
             for index, value in enumerate(row)
         )
         for row in rows
