@@ -17,7 +17,7 @@ SOURCE_SQL = next(
     and any(isinstance(target, ast.Name) and target.id == "SOURCE_SQL" for target in node.targets)
 )
 
-PUBLISHED_COLUMNS = {
+PUBLISHED_COLUMNS = (
     "remittance_reference",
     "accounting_period",
     "remittance_amount",
@@ -28,7 +28,36 @@ PUBLISHED_COLUMNS = {
     "allocation_status",
     "period_status",
     "projection_as_of",
-}
+)
+
+
+def top_level_select_expressions(sql: str) -> list[str]:
+    select_list = sql.split("SELECT", 1)[1].split("FROM genie_spike.remittance", 1)[0]
+    expressions: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(select_list):
+        char = select_list[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(select_list) and select_list[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            expressions.append(select_list[start:index].strip())
+            start = index + 1
+        index += 1
+    expressions.append(select_list[start:].strip())
+    return expressions
 
 
 class ProjectionTest(unittest.TestCase):
@@ -36,15 +65,21 @@ class ProjectionTest(unittest.TestCase):
         ast.parse(PUBLISHER)
 
     def test_source_select_list_matches_explicit_allowlist(self):
-        select_list = SOURCE_SQL.split("FROM genie_spike.remittance", 1)[0]
-        aliases = set(re.findall(r"\bAS\s+([a-z_][a-z0-9_]*)", select_list, re.IGNORECASE))
-        self.assertEqual(PUBLISHED_COLUMNS, aliases)
-        self.assertNotIn("subsidiary_id AS", select_list)
-        self.assertNotIn("allocation_id", select_list)
+        aliases = []
+        for expression in top_level_select_expressions(SOURCE_SQL):
+            matches = re.findall(r"\bAS\s+([a-z_][a-z0-9_]*)", expression, re.IGNORECASE)
+            self.assertEqual(1, len(matches), f"expression must have exactly one alias: {expression}")
+            self.assertRegex(
+                expression,
+                rf"\bAS\s+{re.escape(matches[0])}\s*$",
+                f"alias must terminate expression: {expression}",
+            )
+            aliases.append(matches[0].lower())
+        self.assertEqual(PUBLISHED_COLUMNS, tuple(aliases))
 
     def test_view_matches_explicit_allowlist(self):
         view_select = DDL.split("\nSELECT\n", 1)[1].split("\nFROM ", 1)[0]
-        selected = {name.strip() for name in view_select.split(",")}
+        selected = tuple(name.strip() for name in view_select.split(","))
         self.assertEqual(PUBLISHED_COLUMNS, selected)
 
     def test_source_is_read_only_and_does_not_call_guarded_procs(self):
