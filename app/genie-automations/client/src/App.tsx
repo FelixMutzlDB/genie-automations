@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   Alert,
   AlertDescription,
@@ -27,6 +27,7 @@ import { loadWhoami } from './lib/identity';
 import { loadTaskConfig } from './lib/configGovernance';
 import { canUseIngest } from './lib/governanceState';
 import { joinAndReloadTasks } from './lib/joinTask';
+import { INITIAL_TAB_ERROR_STATE, tabErrorReducer, visibleCoWorkerError, type WorkspaceTab } from './lib/tabErrorState';
 import {
   abortableDelay,
   claimConfirmation,
@@ -88,8 +89,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [coWorkerError, setCoWorkerError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState('co-worker');
+  const [tabErrorState, dispatchTabError] = useReducer(tabErrorReducer, INITIAL_TAB_ERROR_STATE);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState('allocation_upsert');
@@ -448,7 +448,7 @@ export default function App() {
       chatControllerRef.current?.abort();
       chatControllerRef.current = controller;
       setInput('');
-      setCoWorkerError(null);
+      dispatchTabError({ type: 'submit-co-worker' });
       setBusy(true);
       setMessagesByTask((all) => ({ ...all, [taskId]: [...(all[taskId] ?? [START_MESSAGE]), { role: 'you', text }] }));
       try {
@@ -461,7 +461,7 @@ export default function App() {
         const data = (await response.json()) as ChatResponse;
         if (controller.signal.aborted || selectedTaskIdRef.current !== taskId) return;
         if (!response.ok || data.error) {
-          setCoWorkerError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
+          dispatchTabError({ type: 'co-worker-error', message: friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR) });
         } else {
           setMessagesByTask((all) => ({
             ...all,
@@ -481,7 +481,7 @@ export default function App() {
         }
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
-        setCoWorkerError(FRIENDLY_CHAT_ERROR);
+        dispatchTabError({ type: 'co-worker-error', message: FRIENDLY_CHAT_ERROR });
       } finally {
         if (chatControllerRef.current === controller) {
           chatControllerRef.current = null;
@@ -578,10 +578,9 @@ export default function App() {
             </div>
           ) : (
             <Tabs
-              value={activeTab}
+              value={tabErrorState.activeTab}
               onValueChange={(value) => {
-                setActiveTab(value);
-                setCoWorkerError(null);
+                dispatchTabError({ type: 'switch-tab', tab: value as WorkspaceTab });
               }}
               className="flex flex-1 min-h-0 flex-col"
             >
@@ -590,9 +589,9 @@ export default function App() {
                 {canAskData && <TabsTrigger value="ask-data">Ask data</TabsTrigger>}
               </TabsList>
               <TabsContent value="co-worker" className="flex-1 min-h-0 mt-3">
-                {coWorkerError && (
+                {visibleCoWorkerError(tabErrorState) && (
                   <Alert variant="destructive" className="mx-5 mb-3 w-auto">
-                    <AlertDescription>{coWorkerError}</AlertDescription>
+                    <AlertDescription>{visibleCoWorkerError(tabErrorState)}</AlertDescription>
                   </Alert>
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] h-full min-h-0">
@@ -627,7 +626,7 @@ export default function App() {
               </TabsContent>
               {canAskData && (
                 <TabsContent value="ask-data" className="flex flex-1 min-h-0 mt-3">
-                  <GenieTab identity={identity} />
+                  <GenieTab identity={identity} active={tabErrorState.activeTab === 'ask-data'} />
                 </TabsContent>
               )}
             </Tabs>

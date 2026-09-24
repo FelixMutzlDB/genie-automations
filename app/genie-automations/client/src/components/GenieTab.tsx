@@ -39,7 +39,7 @@ const SUGGESTED_QUESTIONS = [
   'What is the breakdown by period status?',
 ] as const;
 
-export function GenieTab({ identity }: { identity: string | null }) {
+export function GenieTab({ identity, active = true }: { identity: string | null; active?: boolean }) {
   const [question, setQuestion] = useState('');
   const { messages, status, sendMessage, reset } = useGenieChat({
     alias: 'default',
@@ -104,7 +104,7 @@ export function GenieTab({ identity }: { identity: string | null }) {
           </div>
         )}
 
-        {status === 'error' && (
+        {active && (status === 'error' || answer?.kind === 'error') && (
           <Alert variant="destructive">
             <AlertDescription>{FRIENDLY_ERROR}</AlertDescription>
           </Alert>
@@ -135,7 +135,7 @@ export function GenieTab({ identity }: { identity: string | null }) {
           </Empty>
         )}
 
-        {!busy && answer && (
+        {!busy && answer && answer.kind !== 'error' && (
           <div className="space-y-4">
             {answer.kind === 'clarification' ? (
               <Alert>
@@ -177,7 +177,7 @@ export function GenieTab({ identity }: { identity: string | null }) {
               </div>
             )}
 
-            {answer.kind === 'answer' && answer.columns.length > 0 && answer.rows.length > 0 ? (
+            {answer.kind === 'answer' && answer.sql && answer.columns.length > 0 && answer.rows.length > 0 ? (
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Results</CardTitle>
@@ -202,7 +202,7 @@ export function GenieTab({ identity }: { identity: string | null }) {
                   </Table>
                 </CardContent>
               </Card>
-            ) : answer.kind === 'answer' ? (
+            ) : answer.kind === 'answer' && answer.sql ? (
               <Empty>
                 <EmptyHeader>
                   <EmptyTitle>No result rows</EmptyTitle>
