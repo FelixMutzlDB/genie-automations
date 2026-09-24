@@ -334,6 +334,27 @@ describe('ingest poll and preview routes', () => {
     expect(state.status).toBe(403);
     expect(read).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['image', 'vision-v1'],
+    ['CSV', 'spike-02-v2'],
+  ])('denies %s polling before retrieving or updating run status when the OBO caller is not a task member', async (_kind, parserVersion) => {
+    const { handlers, appQuery, getRun, getRunOutput } = harness(
+      {},
+      {
+        appRows: [{ task_id: 'receivables-eu', run_id: 77, status: 'running', parser_version: parserVersion }],
+        userRows: [],
+      }
+    );
+    const req = request();
+    req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
+    const { res, state } = response();
+    await handlers.get('GET /api/ingest/:parseId/poll')?.(req, res);
+    expect(state.status).toBe(403);
+    expect(getRun).not.toHaveBeenCalled();
+    expect(getRunOutput).not.toHaveBeenCalled();
+    expect(appQuery.mock.calls.some(([sql]) => String(sql).includes('UPDATE genie_spike.ingest_run'))).toBe(false);
+  });
 });
 
 const PARSE_ID = '98e06e87-9d56-4e92-a530-4bd4ad5b1264';
