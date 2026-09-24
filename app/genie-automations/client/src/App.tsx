@@ -104,7 +104,6 @@ interface Activity {
   occurred_at: string;
 }
 interface ChatResponse {
-  identity?: string;
   reply?: string;
   tool_events?: ToolEvent[];
   proposals?: Proposal[];
@@ -587,7 +586,6 @@ export default function App() {
         });
         const data = (await response.json()) as ChatResponse;
         if (controller.signal.aborted || selectedTaskIdRef.current !== taskId) return;
-        if (data.identity) setIdentity(data.identity);
         if (!response.ok || data.error) {
           setPageError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
         } else {
