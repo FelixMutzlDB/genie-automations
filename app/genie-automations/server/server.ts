@@ -4,6 +4,7 @@ import { setupWhoamiRoute } from './routes/whoami';
 import { setupReconRoutes } from './routes/recon';
 import { setupTaskRoutes } from './routes/tasks';
 import { setupConfigRoutes } from './routes/config';
+import { setupChaseRoutes } from './routes/chase';
 import { configureTaskConfigResolver } from './config/resolveTaskConfig';
 
 createApp({
@@ -27,6 +28,7 @@ createApp({
     setupWhoamiRoute(appkit);
     setupTaskRoutes(appkit);
     setupConfigRoutes(appkit);
+    setupChaseRoutes(appkit);
     setupReconRoutes(appkit);
     if (!isIngestAppKit(appkit)) throw new Error('Ingest plugins are unavailable');
     setupIngestRoutes(appkit);

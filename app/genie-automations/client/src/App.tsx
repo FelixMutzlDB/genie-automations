@@ -22,6 +22,7 @@ import { CreateTaskDialog } from './components/CreateTaskDialog';
 import { DetailsPanel } from './components/DetailsPanel';
 import { IngestDialog } from './components/IngestDialog';
 import { GenieTab } from './components/GenieTab';
+import { RemindersPanel } from './components/RemindersPanel';
 import { TaskContext } from './TaskContext';
 import { loadWhoami } from './lib/identity';
 import { loadTaskConfig } from './lib/configGovernance';
@@ -579,6 +580,7 @@ export default function App() {
               <TabsList className="mx-5 mt-3 w-fit">
                 <TabsTrigger value="co-worker">Co-worker</TabsTrigger>
                 {canAskData && <TabsTrigger value="ask-data">Ask data</TabsTrigger>}
+                {canAskData && <TabsTrigger value="reminders">Reminders</TabsTrigger>}
               </TabsList>
               <TabsContent value="co-worker" className="flex-1 min-h-0 mt-3">
                 <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] h-full min-h-0">
@@ -614,6 +616,11 @@ export default function App() {
               {canAskData && (
                 <TabsContent value="ask-data" className="flex flex-1 min-h-0 mt-3">
                   <GenieTab identity={identity} />
+                </TabsContent>
+              )}
+              {canAskData && (
+                <TabsContent value="reminders" className="flex flex-1 min-h-0 mt-3">
+                  <RemindersPanel task={selectedTask} />
                 </TabsContent>
               )}
             </Tabs>

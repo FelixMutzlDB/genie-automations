@@ -66,6 +66,36 @@ export interface ConfigRequest {
   created_by: string | null;
 }
 
+export interface ReminderConfig {
+  task_id?: string;
+  enabled: boolean;
+  cadence: 'daily' | 'weekly';
+  due_offset_days: number;
+  default_due_at: string | null;
+  approach_offsets: number[];
+  post_due_offsets: number[];
+  quiet_hours_start: string;
+  quiet_hours_end: string;
+  timezone: string;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface ReminderPreviewItem {
+  item_reference: string;
+  due_at: string;
+  state: 'approaching_due' | 'overdue';
+  outstanding_amount: string | number;
+  next_check_at: string | null;
+  timezone: string;
+}
+
+export interface ReminderPreview {
+  counts: { total: number; approaching: number; overdue: number };
+  summary: string;
+  items: ReminderPreviewItem[];
+}
+
 export interface ParsePreview {
   parse_id: string;
   sha256: string;
