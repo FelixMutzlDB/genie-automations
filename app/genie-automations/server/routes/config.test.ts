@@ -74,10 +74,14 @@ describe('config governance database contract', () => {
     expect(appYaml).toContain('name: LAKEBASE_ENDPOINT\n    valueFrom: postgres');
     expect(appYaml).toContain('name: DATABRICKS_VOLUME_FILES\n    valueFrom: files');
     expect(appYaml).toContain('name: DATABRICKS_JOB_ID\n    valueFrom: job');
-    expect(appYaml).toContain('name: CONFIG_ADMIN_PRINCIPALS\n    value: ${var.config_admin_principals}');
-    expect(appYaml).toContain('name: CONFIG_DESTINATION_ALLOWLIST\n    value: ${var.config_destination_allowlist}');
-    expect(bundle).toMatch(/config_admin_principals:\n\s+description:[^\n]+\n\s+config_destination_allowlist:/);
-    expect(bundle).toMatch(/config_destination_allowlist:\n\s+description:[^\n]+\n\nresources:/);
+    expect(appYaml).toContain('name: CONFIG_ADMIN_PRINCIPALS\n    valueFrom: config-admin-principals');
+    expect(appYaml).toContain('name: CONFIG_DESTINATION_ALLOWLIST\n    valueFrom: config-destination-allowlist');
+    expect(bundle).toContain('name: config-admin-principals\n          secret:');
+    expect(bundle).toContain('name: config-destination-allowlist\n          secret:');
+    expect(bundle).toContain('scope: ${var.config_secret_scope}');
+    expect(bundle).toContain('key: ${var.config_admin_principals_secret_key}');
+    expect(bundle).toContain('key: ${var.config_destination_allowlist_secret_key}');
+    expect(bundle).toMatch(/secret:\n\s+scope: \$\{var\.config_secret_scope\}\n\s+key: [^\n]+\n\s+permission: READ/);
     expect(bundle).not.toMatch(/\n\s+config:\n\s+env:/);
     expect(bundle).not.toContain('felix.mutzl@databricks.com');
   });

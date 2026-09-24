@@ -7,6 +7,6 @@ env:
   - name: DATABRICKS_JOB_ID
     valueFrom: job
   - name: CONFIG_ADMIN_PRINCIPALS
-    value: ${var.config_admin_principals}
+    valueFrom: config-admin-principals
   - name: CONFIG_DESTINATION_ALLOWLIST
-    value: ${var.config_destination_allowlist}
+    valueFrom: config-destination-allowlist

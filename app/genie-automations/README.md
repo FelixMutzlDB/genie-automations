@@ -2,6 +2,26 @@
 
 A Databricks App powered by [AppKit](https://developers.databricks.com/docs/appkit/v0/), featuring React, TypeScript, and Tailwind CSS.
 
+## Runtime configuration
+
+Production runtime configuration is injected from the Databricks secret scope
+`genie-automations-config`. Create or update the values before deploying:
+
+```sh
+databricks secrets create-scope genie-automations-config --profile <profile>
+databricks secrets put-secret genie-automations-config admin-principals --profile <profile>
+databricks secrets put-secret genie-automations-config destination-allowlist --profile <profile>
+databricks bundle validate --strict --profile <profile>
+databricks bundle deploy --profile <profile>
+```
+
+Enter comma-separated trusted principals for `admin-principals` and
+comma-separated fully-qualified table names for `destination-allowlist` at the
+interactive prompts. The app binds these secrets and its Lakebase, Volume, and
+Job resources through the single `app.yaml` environment list. Override the
+scope or key names at deployment with `--var` if needed; secret values are never
+bundle variables or committed defaults.
+
 **Enabled plugins:**
 - **Lakebase** -- Fully managed Postgres database for transactional (OLTP) workloads on Databricks
 - **Server** -- Express HTTP server with static file serving and Vite dev mode
