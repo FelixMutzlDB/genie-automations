@@ -104,11 +104,15 @@ describe('config admin route authorization', () => {
     const { res, state } = response();
 
     await handlers.get('POST /api/admin/tasks/:id/bindings')?.(
-      request('ADMIN@example.com', { id: 'task-1' }, {
-        dest_catalog: 'catalog',
-        dest_schema: 'schema',
-        dest_table: 'table',
-      }),
+      request(
+        'ADMIN@example.com',
+        { id: 'task-1' },
+        {
+          dest_catalog: 'catalog',
+          dest_schema: 'schema',
+          dest_table: 'table',
+        }
+      ),
       res
     );
 
