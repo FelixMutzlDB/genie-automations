@@ -95,6 +95,7 @@ export default function App() {
   const [preview, setPreview] = useState<ParsePreview | null>(null);
   const [selectedPreviewRows, setSelectedPreviewRows] = useState<Set<number>>(new Set());
   const [confirmSubmitting, setConfirmSubmitting] = useState(false);
+  const [humanReviewedImage, setHumanReviewedImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
@@ -119,6 +120,7 @@ export default function App() {
     });
     setSelectedPreviewRows(new Set());
     setConfirmSubmitting(false);
+    setHumanReviewedImage(false);
   }, []);
 
   const abortTaskRequests = useCallback(() => {
@@ -323,6 +325,7 @@ export default function App() {
       if (!isCurrent()) return;
       setPreview(null);
       setSelectedPreviewRows(new Set());
+      setHumanReviewedImage(false);
       setIngestState((state) => reduceIngest(state, { type: 'START' }));
       try {
         const upload = await fetch(`/api/ingest/${encodeURIComponent(taskId)}/upload`, {
@@ -398,7 +401,13 @@ export default function App() {
       const response = await fetch('/api/ingest/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parse_id: parseId, selected_row_ids: [...selectedPreviewRows].sort((a, b) => a - b) }),
+        body: JSON.stringify({
+          parse_id: parseId,
+          selected_row_ids: [...selectedPreviewRows].sort((a, b) => a - b),
+          ...(preview.requires_human_confirmation && humanReviewedImage && preview.artifact_hash
+            ? { human_review_acknowledgement: { parse_id: parseId, artifact_hash: preview.artifact_hash, reviewed: true } }
+            : {}),
+        }),
         signal: controller.signal,
       });
       const result = (await response.json()) as { proposal_ids?: string[]; error?: string; message?: string };
@@ -421,7 +430,7 @@ export default function App() {
       confirmSubmissionRef.current = false;
       setConfirmSubmitting(false);
     }
-  }, [ingestState.parseId, preview, refreshTaskViews, selectedPreviewRows, selectedTask]);
+  }, [humanReviewedImage, ingestState.parseId, preview, refreshTaskViews, selectedPreviewRows, selectedTask]);
 
   const send = useCallback(
     async (text: string) => {
@@ -608,10 +617,12 @@ export default function App() {
             selectedRows={selectedPreviewRows}
             selectedTask={selectedTask}
             confirmSubmitting={confirmSubmitting}
+            humanReviewed={humanReviewedImage}
             onOpen={() => setIngestOpen(true)}
             onClose={closeIngest}
             onSelectedRowsChange={setSelectedPreviewRows}
             onConfirm={() => void confirmPreview()}
+            onHumanReviewedChange={setHumanReviewedImage}
           />
         </div>
       </TooltipProvider>

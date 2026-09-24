@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = new Set(['csv', 'xlsx']);
+export type IngestExtension = 'csv' | 'xlsx' | 'png' | 'jpg' | 'jpeg';
+export type ExtractionKind = 'deterministic' | 'probabilistic_image';
+export type DetectedIngestType = 'csv' | 'xlsx' | 'png' | 'jpeg';
+const ALLOWED_EXTENSIONS = new Set<IngestExtension>(['csv', 'xlsx', 'png', 'jpg', 'jpeg']);
 
 export interface IngestTaskGate {
   is_member: boolean;
@@ -20,10 +23,27 @@ export function ingestGateFailure(task: IngestTaskGate | undefined): GateFailure
   return null;
 }
 
-export function safeExtension(filename: string): 'csv' | 'xlsx' | null {
+export function safeExtension(filename: string): IngestExtension | null {
   const match = /\.([a-z0-9]+)$/i.exec(filename.trim());
   const extension = match?.[1]?.toLowerCase();
-  return extension && ALLOWED_EXTENSIONS.has(extension) ? (extension as 'csv' | 'xlsx') : null;
+  return extension && ALLOWED_EXTENSIONS.has(extension as IngestExtension) ? (extension as IngestExtension) : null;
+}
+
+export function extractionKind(detected: DetectedIngestType): ExtractionKind {
+  return detected === 'csv' || detected === 'xlsx' ? 'deterministic' : 'probabilistic_image';
+}
+
+export function detectIngestType(raw: Buffer): DetectedIngestType | null {
+  if (raw.length >= 8 && raw.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'png';
+  if (raw.length >= 4 && raw[0] === 0xff && raw[1] === 0xd8 && raw[raw.length - 2] === 0xff && raw[raw.length - 1] === 0xd9)
+    return 'jpeg';
+  if (raw.length >= 4 && raw.subarray(0, 4).equals(Buffer.from('504b0304', 'hex'))) return 'xlsx';
+  if (validCsvBytes(raw)) return 'csv';
+  return null;
+}
+
+export function extensionMatchesDetectedType(extension: IngestExtension, detected: DetectedIngestType): boolean {
+  return extension === detected || ((extension === 'jpg' || extension === 'jpeg') && detected === 'jpeg');
 }
 
 export function sha256(raw: Buffer): string {
@@ -111,7 +131,7 @@ export function parseRunStatus(run: Record<string, unknown>): ParseRunStatus {
   return 'pending';
 }
 
-export function uploadPath(taskId: string, digest: string, extension: 'csv' | 'xlsx'): string {
+export function uploadPath(taskId: string, digest: string, extension: IngestExtension): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(taskId)) throw new Error('invalid task id');
   if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('invalid SHA-256');
   return `${taskId}/${digest}/original.${extension}`;

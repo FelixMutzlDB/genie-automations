@@ -4,13 +4,18 @@ import {
   isAlreadyExists,
   MAX_UPLOAD_BYTES,
   newParseId,
+  detectIngestType,
+  extractionKind,
+  extensionMatchesDetectedType,
   parseRunStatus,
   safeExtension,
   sha256,
   uploadPath,
-  validCsvBytes,
 } from '../ingest';
 import { activeConfigHash, ConfigResolutionError, resolveTaskConfig } from '../config/resolveTaskConfig';
+import { extractImage } from '../ingest/imageExtraction';
+import { calculateArtifactHash } from '../ingest/artifactIntegrity';
+import { validateMoney } from '../ingest/money';
 
 const SCHEMA = 'genie_spike';
 const PARSER_VERSION = 'spike-02-v2';
@@ -33,6 +38,7 @@ export interface IngestAppKit {
       exists(path: string): Promise<boolean>;
       upload(path: string, body: Buffer, options: { overwrite: boolean }): Promise<void>;
       read(path: string, options?: { maxSize?: number }): Promise<string>;
+      download(path: string): Promise<{ contents?: ReadableStream<Uint8Array>; 'content-length'?: number }>;
     };
   };
   jobs(name: string): {
@@ -52,6 +58,10 @@ const confirmSchema = z
   .object({
     parse_id: idSchema,
     selected_row_ids: z.array(z.number().int().positive()).min(1),
+    human_review_acknowledgement: z
+      .object({ parse_id: idSchema, artifact_hash: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true) })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -65,6 +75,11 @@ interface IngestArtifact {
   config_version: string;
   status: string;
   rows: CanonicalArtifactRow[];
+  extraction_kind?: 'deterministic' | 'probabilistic_image';
+  modality?: 'image';
+  requires_human_confirmation?: boolean;
+  artifact_hash?: string;
+  sha256: string;
 }
 
 function isReceivablesTask(taskType: string): boolean {
@@ -79,7 +94,7 @@ function auditUnattributedConfirmFailure(actor: string | null, reason: string): 
   console.warn('Ingest-confirm audit:', { actor: actor ?? 'unverified', status: 'failure', reason });
 }
 
-function canonicalArtifact(raw: string, parseId: string, configVersion: string): IngestArtifact {
+function canonicalArtifact(parsed: unknown, parseId: string, configVersion: string): IngestArtifact {
   const artifact = z
     .object({
       parse_id: z.literal(parseId),
@@ -93,16 +108,44 @@ function canonicalArtifact(raw: string, parseId: string, configVersion: string):
               .object({
                 remittance_id: z.string().min(1),
                 invoice_id: z.string().min(1),
-                amount: z.string().regex(/^-?\d+(?:\.\d+)?$/),
+                amount: z.string(),
               })
               .passthrough(),
           })
           .passthrough()
       ),
+      extraction_kind: z.enum(['deterministic', 'probabilistic_image']).optional(),
+      modality: z.literal('image').optional(),
+      requires_human_confirmation: z.boolean().optional(),
+      artifact_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .passthrough()
-    .parse(JSON.parse(raw));
+    .parse(parsed);
+  for (const row of artifact.rows) row.values.amount = validateMoney(row.values.amount);
   return artifact;
+}
+
+async function downloadedBytes(
+  response: { contents?: ReadableStream<Uint8Array>; 'content-length'?: number },
+  maximumBytes: number
+): Promise<Buffer> {
+  if ((response['content-length'] ?? 0) > maximumBytes) throw new Error('landed upload exceeds size limit');
+  if (!response.contents) return Buffer.alloc(0);
+  const reader = response.contents.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maximumBytes) {
+      await reader.cancel();
+      throw new Error('landed upload exceeds size limit');
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
 }
 
 async function recordConfirmActivity(
@@ -157,15 +200,12 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         } catch {
           return friendlyFailure(res, 400, 'The file name is invalid.');
         }
-        const extension = safeExtension(filename);
-        if (!extension) return friendlyFailure(res, 415, 'Choose a CSV or XLSX file.');
         if (!Buffer.isBuffer(req.body) || req.body.length === 0) return friendlyFailure(res, 400, 'The file is empty.');
-        if (extension === 'xlsx' && !req.body.subarray(0, 4).equals(Buffer.from('504b0304', 'hex'))) {
-          return friendlyFailure(res, 415, 'That file is not a valid XLSX workbook.');
-        }
-        if (extension === 'csv' && !validCsvBytes(req.body)) {
-          return friendlyFailure(res, 415, 'That CSV contains binary or unsupported content.');
-        }
+        const detectedType = detectIngestType(req.body);
+        const extension = safeExtension(filename);
+        if (!extension || !detectedType || !extensionMatchesDetectedType(extension, detectedType))
+          return friendlyFailure(res, 415, 'The file contents do not match its CSV, XLSX, PNG, or JPEG name.');
+        const kind = extractionKind(detectedType);
 
         const digest = sha256(req.body);
         const relativePath = uploadPath(req.params.taskId, digest, extension);
@@ -188,9 +228,28 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           `INSERT INTO ${SCHEMA}.ingest_run
              (parse_id, task_id, requested_by, volume_path, sha256, parser_version, config_version, status, artifact_ref)
            VALUES ($1,$2,$3,$4,$5,$6,$7,'UPLOADED',$8)
-           ON CONFLICT (parse_id) DO NOTHING`,
-          [parseId, req.params.taskId, actor, relativePath, digest, PARSER_VERSION, configVersion, artifactPath]
+           ON CONFLICT (parse_id) DO NOTHING
+           RETURNING sha256`,
+          [parseId, req.params.taskId, actor, relativePath, digest, kind === 'deterministic' ? PARSER_VERSION : 'vision-v1', configVersion, artifactPath]
         );
+        const inserted = await db.query(`SELECT sha256 FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`, [parseId]);
+        const storedDigest = inserted.rows[0]?.['sha256'];
+        const landedBytes = await downloadedBytes(await userFiles.download(relativePath), MAX_UPLOAD_BYTES);
+        const landedDigest = sha256(landedBytes);
+        if (storedDigest !== digest || landedDigest !== digest) throw new Error('landed upload failed SHA-256 verification');
+
+        if (kind === 'probabilistic_image') {
+          const artifact = await extractImage(req, {
+            raw: landedBytes,
+            mimeType: detectedType === 'png' ? 'image/png' : 'image/jpeg',
+            parseId,
+            configVersion,
+            sha256: digest,
+          });
+          await userFiles.upload(artifactPath, Buffer.from(JSON.stringify(artifact)), { overwrite: false });
+          await db.query(`UPDATE ${SCHEMA}.ingest_run SET status='succeeded', updated_at=now() WHERE parse_id=$1`, [parseId]);
+          return res.status(202).json({ parse_id: parseId, run_id: 0, sha256: digest, extraction_kind: kind });
+        }
 
         const run = await appkit.jobs('default').runNow({
           args: [
@@ -229,13 +288,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const parseId = idSchema.parse(req.params.parseId);
         const db = appkit.lakebase;
         const record = await db.query(
-          `SELECT ir.run_id, ir.status FROM ${SCHEMA}.ingest_run ir
+          `SELECT ir.run_id, ir.status, ir.parser_version FROM ${SCHEMA}.ingest_run ir
              JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
             WHERE ir.parse_id=$1 AND tm.user_id=$2`,
           [parseId, actor]
         );
         const row = record.rows[0];
         if (!row) return friendlyFailure(res, 403, 'You cannot view this parse run.');
+        if (row['parser_version'] === 'vision-v1') {
+          const status = row['status'] === 'succeeded' ? 'succeeded' : row['status'] === 'failed' ? 'failed' : 'running';
+          return res.json({ parse_id: parseId, run_id: 0, status });
+        }
         const runId = Number(row['run_id']);
         const run = await appkit.jobs('default').getRun(runId);
         if (!run.ok || !run.data) throw new Error('parse status unavailable');
@@ -306,7 +369,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           return friendlyFailure(res, 400, 'We could not safely stage those rows. Nothing was changed.');
         }
         const run = await userDb.query(
-          `SELECT ir.task_id, ir.artifact_ref, ir.config_version
+          `SELECT ir.task_id, ir.artifact_ref, ir.config_version, ir.sha256, ir.parser_version
              FROM ${SCHEMA}.ingest_run ir
             WHERE ir.parse_id=$1 AND ir.requested_by=$2`,
           [candidateParseId.data, actor]
@@ -343,7 +406,39 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           .files('files')
           .asUser(req)
           .read(artifactRef, { maxSize: 10 * 1024 * 1024 });
-        const artifact = canonicalArtifact(artifactRaw, body.parse_id, configVersion);
+        const artifactValue: unknown = JSON.parse(artifactRaw);
+        if (
+          artifactValue === null ||
+          typeof artifactValue !== 'object' ||
+          (artifactValue as Record<string, unknown>)['status'] !== 'ready'
+        ) {
+          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'artifact_rejected' });
+          return friendlyFailure(res, 409, 'This preview failed its financial checks and cannot be staged. Upload a corrected source.');
+        }
+        const artifact = canonicalArtifact(artifactValue, body.parse_id, configVersion);
+        const storedSourceSha = runRow?.['sha256'];
+        if (typeof storedSourceSha !== 'string' || artifact.sha256 !== storedSourceSha)
+          throw new Error('artifact source SHA-256 does not match its ingest run');
+        const trustedParserVersion = runRow?.['parser_version'];
+        if (trustedParserVersion !== PARSER_VERSION && trustedParserVersion !== 'vision-v1')
+          throw new Error('unknown ingest parser version');
+        if (trustedParserVersion === 'vision-v1') {
+          const acknowledgement = body.human_review_acknowledgement;
+          const recomputedArtifactHash = calculateArtifactHash(artifactValue);
+          if (
+            artifact.modality !== 'image' ||
+            artifact.extraction_kind !== 'probabilistic_image' ||
+            artifact.requires_human_confirmation !== true ||
+            typeof artifact.artifact_hash !== 'string' ||
+            !acknowledgement ||
+            acknowledgement.parse_id !== artifact.parse_id ||
+            acknowledgement.artifact_hash !== artifact.artifact_hash ||
+            recomputedArtifactHash !== artifact.artifact_hash
+          ) {
+            await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'human_review_acknowledgement_required' });
+            return friendlyFailure(res, 409, 'Review every extracted image value and explicitly confirm this exact preview before staging.');
+          }
+        }
         const selectedIds = new Set(body.selected_row_ids);
         if (selectedIds.size !== body.selected_row_ids.length) throw new Error('duplicate selected row');
         const selected = artifact.rows.filter((row) => selectedIds.has(row.source_row));
