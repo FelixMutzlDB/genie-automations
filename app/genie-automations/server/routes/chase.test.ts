@@ -183,6 +183,8 @@ describe('chase routes', () => {
 
 describe('chase migration', () => {
   const migration = readFileSync(new URL('../../migrations/003_chase_reminders.sql', import.meta.url), 'utf8');
+  const functionBody = (name: string): string =>
+    migration.match(new RegExp(`FUNCTION genie_spike\\.${name}[^]*?AS \\$\\$([^]*?)\\$\\$;`))?.[1] ?? '';
 
   it('creates the two additive tables with their natural key and state model', () => {
     expect(migration).toContain('CREATE TABLE IF NOT EXISTS genie_spike.task_schedule_config');
@@ -199,7 +201,7 @@ describe('chase migration', () => {
 
   it('uses OBO-callable security-definer chase functions for configured admins without broad write grants', () => {
     expect(migration).toContain('save_task_schedule_config');
-    expect(migration).toContain('LANGUAGE sql SECURITY DEFINER');
+    expect(migration).toContain('LANGUAGE plpgsql SECURITY DEFINER');
     expect(migration).toContain('p_timezone,session_user,now()');
     expect(migration).toContain('GRANT EXECUTE ON FUNCTION genie_spike.save_task_schedule_config');
     expect(migration).toContain(
@@ -211,5 +213,40 @@ describe('chase migration', () => {
     expect(migration).not.toContain(
       'GRANT SELECT, INSERT, UPDATE ON genie_spike.task_schedule_config, genie_spike.chase_item_status TO :"obo_role"'
     );
+  });
+
+  it('rejects direct non-member calls to every chase read function before reading data', () => {
+    const guard = functionBody('assert_chase_access');
+    expect(guard).toContain('lower(tm.user_id)=lower(session_user)');
+    expect(guard).toContain("has_table_privilege(session_user,'genie_spike.destination_allowlist','DELETE')");
+    expect(guard).toContain('IF NOT p_write AND caller_role IS NULL AND NOT caller_is_admin THEN');
+    expect(guard).toContain("ERRCODE='42501'");
+
+    for (const name of ['get_task_schedule_config', 'get_chase_preview']) {
+      const body = functionBody(name);
+      const authorization = body.indexOf('assert_chase_access(p_task_id,false)');
+      const read = body.indexOf('RETURN QUERY SELECT');
+      expect(authorization, `${name} must authorize direct callers`).toBeGreaterThanOrEqual(0);
+      expect(read, `${name} must have a read`).toBeGreaterThan(authorization);
+    }
+  });
+
+  it('rejects direct non-owner/non-admin calls to every chase write function before changing data', () => {
+    const guard = functionBody('assert_chase_access');
+    expect(guard).toContain("IF p_write AND caller_role IS DISTINCT FROM 'owner' AND NOT caller_is_admin THEN");
+    expect(guard).toContain("ERRCODE='42501'");
+
+    const mutations = new Map([
+      ['save_task_schedule_config', 'RETURN QUERY WITH saved AS'],
+      ['save_chase_item_status', 'INSERT INTO genie_spike.chase_item_status'],
+      ['resolve_missing_chase_items', 'UPDATE genie_spike.chase_item_status'],
+    ]);
+    for (const [name, mutation] of mutations) {
+      const body = functionBody(name);
+      const authorization = body.indexOf('assert_chase_access(p_task_id,true)');
+      const write = body.indexOf(mutation);
+      expect(authorization, `${name} must authorize direct callers`).toBeGreaterThanOrEqual(0);
+      expect(write, `${name} must not mutate before authorization`).toBeGreaterThan(authorization);
+    }
   });
 });
