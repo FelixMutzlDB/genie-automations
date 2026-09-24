@@ -12,7 +12,7 @@ const modelOutputSchema = z.object({
       pay_date: z.string().optional(),
     })
   ),
-  stated_total: z.union([z.string(), z.number()]).optional(),
+  stated_total: z.union([z.string(), z.number()]).nullable().optional(),
 });
 
 export interface ImageArtifactRow {
@@ -117,7 +117,7 @@ export async function extractImage(
     ];
   });
   const warnings = ['Image extraction is probabilistic. Every selected value must be reviewed by a person.'];
-  if (extracted.stated_total !== undefined) {
+  if (extracted.stated_total != null) {
     try {
       const total = moneyToMinorUnits(validateMoney(extracted.stated_total));
       if (total !== sum)
