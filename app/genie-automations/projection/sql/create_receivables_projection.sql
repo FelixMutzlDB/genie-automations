@@ -18,4 +18,4 @@ SELECT
 FROM `felix_demo_catalog`.`genie-automations`.`receivables_committed_snapshot`;
 
 ALTER VIEW `felix_demo_catalog`.`genie-automations`.`receivables_committed`
-SET TAGS ('data_classification' = 'internal', 'projection_mode' = 'scheduled_snapshot');
+SET TAGS ('data_classification' = 'u-nnpi', 'projection_mode' = 'scheduled_snapshot');
