@@ -86,6 +86,26 @@ describe('error response shaping', () => {
 });
 
 describe('task routes', () => {
+  it('rejects destination, identity, scope, and config fields on task creation', async () => {
+    const { handlers, query } = routeHarness();
+    const { res, state } = response();
+    await handlers.get('POST /api/tasks')?.(
+      request({
+        body: {
+          name: 'New task',
+          task_type: 'receivables',
+          target_table: 'attacker',
+          identity_ref: 'service',
+          config_hash: 'forged',
+        },
+      }),
+      res
+    );
+    expect(state.status).toBe(400);
+    expect(state.body).toEqual({ error: 'unsupported task fields: config_hash, identity_ref, target_table' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('lists active demo tasks, including tasks the user could join', async () => {
     const task = { task_id: 'receivables-eu', role: 'owner', member_count: 1 };
     const { handlers, query } = routeHarness([task]);
@@ -94,6 +114,8 @@ describe('task routes', () => {
     await handlers.get('GET /api/tasks')?.(request(), res);
 
     expect(query).toHaveBeenCalledWith(expect.stringContaining("t.org_id = 'org-demo'"), ['alice@example.com']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('LEFT JOIN LATERAL'), ['alice@example.com']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("bool_or(db.status='active')"), ['alice@example.com']);
     expect(state.body).toEqual([task]);
   });
 
@@ -177,11 +199,11 @@ describe('task routes', () => {
     );
 
     expect(log).toHaveBeenCalledWith('Task join failed', {
-        request_id: 'request-123',
-        actor: 'alice@example.com',
-        task_id: 'vendor-bank-eu',
-        sqlstate: '42501',
-      });
+      request_id: 'request-123',
+      actor: 'alice@example.com',
+      task_id: 'vendor-bank-eu',
+      sqlstate: '42501',
+    });
     expect(inspect(log.mock.calls)).not.toContain('private database details');
     expect(state.status).toBe(500);
     expect(state.body).toEqual({
@@ -234,7 +256,9 @@ describe('task routes', () => {
   it.each(['/api/approve', '/api/commit'])('rejects unauthorized proposals before guarded %s', async (path) => {
     const query = vi
       .fn()
-      .mockResolvedValueOnce({ rows: [{ task_id: 'other-org-task' }] })
+      .mockResolvedValueOnce({
+        rows: [{ task_id: 'other-org-task', config_version_hash: 'a'.repeat(64), change_type: 'allocation_upsert' }],
+      })
       .mockResolvedValueOnce({ rows: [] });
     const handlers = reconHarness(query);
     const { res, state } = response();

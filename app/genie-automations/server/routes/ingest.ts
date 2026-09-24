@@ -1,7 +1,6 @@
 import { Application, Request, Response, raw as rawBody } from 'express';
 import { z } from 'zod';
 import {
-  ingestGateFailure,
   isAlreadyExists,
   MAX_UPLOAD_BYTES,
   newParseId,
@@ -10,12 +9,11 @@ import {
   sha256,
   uploadPath,
   validCsvBytes,
-  type IngestTaskGate,
 } from '../ingest';
+import { activeConfigHash, ConfigResolutionError, resolveTaskConfig } from '../config/resolveTaskConfig';
 
 const SCHEMA = 'genie_spike';
 const PARSER_VERSION = 'spike-02-v2';
-const CONFIG_VERSION = 'receivables-v1';
 
 interface QueryResult {
   rows: Record<string, unknown>[];
@@ -141,45 +139,16 @@ function friendlyFailure(res: Response, status: number, message: string): void {
   res.status(status).json({ error: message });
 }
 
-async function authorizedTask(
-  appkit: IngestAppKit,
-  req: Request,
-  taskId: string,
-  actor: string
-): Promise<IngestTaskGate | undefined> {
-  const result = await appkit.lakebase.asUser(req).query(
-    `SELECT EXISTS (
-       SELECT 1 FROM ${SCHEMA}.task_member tm
-        WHERE tm.task_id = t.task_id AND tm.user_id = $2
-     ) AS is_member,
-     t.ingest_enabled, t.target_catalog, t.target_schema, t.target_table
-     FROM ${SCHEMA}.task t
-     WHERE t.task_id = $1 AND t.status = 'active'`,
-    [taskId, actor]
-  );
-  const row = result.rows[0];
-  if (!row) return undefined;
-  return {
-    is_member: row['is_member'] === true,
-    ingest_enabled: row['ingest_enabled'] === true,
-    target_catalog: typeof row['target_catalog'] === 'string' ? row['target_catalog'] : null,
-    target_schema: typeof row['target_schema'] === 'string' ? row['target_schema'] : null,
-    target_table: typeof row['target_table'] === 'string' ? row['target_table'] : null,
-  };
-}
-
 export function setupIngestRoutes(appkit: IngestAppKit): void {
   appkit.server.extend((app) => {
     app.post('/api/ingest/:taskId/upload', rawBody({ type: '*/*', limit: MAX_UPLOAD_BYTES }), async (req, res) => {
       try {
         const actor = actorOf(req);
         if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
-        const task = await authorizedTask(appkit, req, req.params.taskId, actor);
-        const failure = ingestGateFailure(task);
-        if (failure === 'not_member') return friendlyFailure(res, 403, 'You are not a member of this automation.');
-        if (failure === 'ingest_disabled') return friendlyFailure(res, 409, 'File collection is not enabled here.');
-        if (failure === 'target_unbound')
-          return friendlyFailure(res, 409, 'This automation needs a complete target binding.');
+        const configVersion = await activeConfigHash(req, req.params.taskId);
+        const spec = await resolveTaskConfig(req, req.params.taskId, configVersion, 'allocation_upsert');
+        if (spec.settings['ingest_enabled'] !== true)
+          return friendlyFailure(res, 409, 'File collection is not enabled here.');
 
         const encodedName = req.header('x-upload-filename') ?? '';
         let filename = '';
@@ -220,7 +189,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
              (parse_id, task_id, requested_by, volume_path, sha256, parser_version, config_version, status, artifact_ref)
            VALUES ($1,$2,$3,$4,$5,$6,$7,'UPLOADED',$8)
            ON CONFLICT (parse_id) DO NOTHING`,
-          [parseId, req.params.taskId, actor, relativePath, digest, PARSER_VERSION, CONFIG_VERSION, artifactPath]
+          [parseId, req.params.taskId, actor, relativePath, digest, PARSER_VERSION, configVersion, artifactPath]
         );
 
         const run = await appkit.jobs('default').runNow({
@@ -245,7 +214,11 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         res.status(202).json({ parse_id: parseId, run_id: run.data.run_id, sha256: digest });
       } catch (error) {
         console.error('Ingest upload failed:', error);
-        friendlyFailure(res, 500, 'We could not safely upload and start parsing this file. Nothing was changed.');
+        if (error instanceof ConfigResolutionError) {
+          friendlyFailure(res, error.status, error.message);
+        } else {
+          friendlyFailure(res, 500, 'We could not safely upload and start parsing this file. Nothing was changed.');
+        }
       }
     });
 
@@ -346,38 +319,14 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         }
         const body = confirmSchema.parse(req.body);
 
-        const authorization = await userDb.query(
-          `SELECT EXISTS (
-             SELECT 1 FROM ${SCHEMA}.task_member tm WHERE tm.task_id=t.task_id AND tm.user_id=$2
-           ) AS is_member,
-           t.task_type, t.ingest_enabled, t.target_catalog, t.target_schema, t.target_table
-           FROM ${SCHEMA}.task t WHERE t.task_id=$1 AND t.status='active'`,
-          [taskId, actor]
-        );
-        const taskRow = authorization.rows[0];
-        const gate: IngestTaskGate | undefined = taskRow
-          ? {
-              is_member: taskRow['is_member'] === true,
-              ingest_enabled: taskRow['ingest_enabled'] === true,
-              target_catalog: typeof taskRow['target_catalog'] === 'string' ? taskRow['target_catalog'] : null,
-              target_schema: typeof taskRow['target_schema'] === 'string' ? taskRow['target_schema'] : null,
-              target_table: typeof taskRow['target_table'] === 'string' ? taskRow['target_table'] : null,
-            }
-          : undefined;
-        const failure = ingestGateFailure(gate);
-        if (failure) {
-          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: failure });
-          const status = failure === 'not_member' ? 403 : 409;
-          const message =
-            failure === 'not_member'
-              ? 'You are not a member of this automation.'
-              : failure === 'ingest_disabled'
-                ? 'File collection is not enabled here.'
-                : 'This automation needs a complete target binding.';
-          return friendlyFailure(res, status, message);
+        const pinnedVersion = runRow?.['config_version'];
+        if (typeof pinnedVersion !== 'string') throw new Error('invalid ingest run');
+        const spec = await resolveTaskConfig(req, taskId, pinnedVersion, 'allocation_upsert', false);
+        if (spec.settings['ingest_enabled'] !== true) {
+          await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'ingest_disabled' });
+          return friendlyFailure(res, 409, 'File collection is not enabled here.');
         }
-        const taskType = typeof taskRow?.['task_type'] === 'string' ? taskRow['task_type'] : '';
-        if (!isReceivablesTask(taskType)) {
+        if (!isReceivablesTask(spec.taskType)) {
           // TODO: stage_change must become task-type-aware before vendor-bank-detail ingest can be staged safely.
           await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'unsupported_task_type' });
           return friendlyFailure(
@@ -388,7 +337,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         }
 
         const artifactRef = runRow?.['artifact_ref'];
-        const configVersion = runRow?.['config_version'];
+        const configVersion = pinnedVersion;
         if (typeof artifactRef !== 'string' || typeof configVersion !== 'string') throw new Error('invalid ingest run');
         const artifactRaw = await appkit
           .files('files')
@@ -485,7 +434,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           }
         }
         console.error('Ingest confirm failed:', error);
-        const status = error instanceof z.ZodError ? 400 : 409;
+        const status = error instanceof z.ZodError ? 400 : error instanceof ConfigResolutionError ? error.status : 409;
         friendlyFailure(res, status, 'We could not safely stage those rows. Nothing was changed.');
       }
     });
