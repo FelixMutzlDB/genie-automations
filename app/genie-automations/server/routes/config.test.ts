@@ -1,5 +1,127 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { Application, Request, Response } from 'express';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { setupConfigRoutes } from './config';
+
+type Handler = (req: Request, res: Response) => void | Promise<void>;
+
+function routeHarness() {
+  const handlers = new Map<string, Handler>();
+  const query = vi.fn().mockResolvedValue({ rows: [{}] });
+  const app = {
+    get(path: string, handler: Handler) {
+      handlers.set(`GET ${path}`, handler);
+    },
+    post(path: string, handler: Handler) {
+      handlers.set(`POST ${path}`, handler);
+    },
+    put(path: string, handler: Handler) {
+      handlers.set(`PUT ${path}`, handler);
+    },
+  } as Application;
+  setupConfigRoutes({
+    lakebase: { asUser: () => ({ query }) },
+    server: { extend: (register) => register(app) },
+  });
+  return { handlers, query };
+}
+
+function request(actor: string, params: Record<string, string> = {}, body: unknown = {}): Request {
+  return {
+    params,
+    body,
+    header: (name: string) => (name === 'x-forwarded-email' ? actor : undefined),
+  } as Request;
+}
+
+function response() {
+  const state: { status?: number; body?: unknown } = {};
+  const res = {
+    status(code: number) {
+      state.status = code;
+      return res;
+    },
+    json(body: unknown) {
+      state.body = body;
+      return res;
+    },
+  } as Response;
+  return { res, state };
+}
+
+afterEach(() => vi.unstubAllEnvs());
+
+describe('config admin route authorization', () => {
+  const nonAdminCases: Array<{
+    method: 'GET' | 'POST';
+    path: string;
+    params?: Record<string, string>;
+    body?: unknown;
+  }> = [
+    { method: 'GET', path: '/api/admin/config-destinations' },
+    {
+      method: 'POST',
+      path: '/api/admin/tasks/:id/bindings',
+      params: { id: 'task-1' },
+      body: { dest_catalog: 'catalog', dest_schema: 'schema', dest_table: 'table' },
+    },
+    {
+      method: 'POST',
+      path: '/api/admin/tasks/:id/bindings/:bindingId/approve',
+      params: { id: 'task-1', bindingId: 'binding-1' },
+    },
+    {
+      method: 'POST',
+      path: '/api/admin/tasks/:id/config/:hash/publish',
+      params: { id: 'task-1', hash: 'a'.repeat(64) },
+    },
+    {
+      method: 'POST',
+      path: '/api/admin/tasks/:id/config/:hash/retire',
+      params: { id: 'task-1', hash: 'a'.repeat(64) },
+    },
+  ];
+
+  it.each(nonAdminCases)('rejects a non-admin before $method $path reaches the database', async (testCase) => {
+    vi.stubEnv('CONFIG_ADMIN_PRINCIPALS', 'admin@example.com');
+    const { handlers, query } = routeHarness();
+    const { res, state } = response();
+
+    await handlers.get(`${testCase.method} ${testCase.path}`)?.(
+      request('user@example.com', testCase.params, testCase.body),
+      res
+    );
+
+    expect(state.status).toBe(403);
+    expect(state.body).toEqual({ error: 'Administrator access is required.' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('allows a configured admin through to the protected mutation boundary', async () => {
+    vi.stubEnv('CONFIG_ADMIN_PRINCIPALS', 'admin@example.com');
+    vi.stubEnv('CONFIG_DESTINATION_ALLOWLIST', 'catalog.schema.table');
+    const { handlers, query } = routeHarness();
+    const { res, state } = response();
+
+    await handlers.get('POST /api/admin/tasks/:id/bindings')?.(
+      request('ADMIN@example.com', { id: 'task-1' }, {
+        dest_catalog: 'catalog',
+        dest_schema: 'schema',
+        dest_table: 'table',
+      }),
+      res
+    );
+
+    expect(state.status).toBe(201);
+    expect(query).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('propose_destination_binding'), [
+      'task-1',
+      'catalog',
+      'schema',
+      'table',
+    ]);
+  });
+});
 
 describe('config governance database contract', () => {
   const migration = readFileSync(new URL('../../migrations/002_config_governance.sql', import.meta.url), 'utf8');

@@ -1,5 +1,5 @@
 import { Application, Request, Response } from 'express';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setupWhoamiRoute } from './whoami';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
@@ -42,6 +42,24 @@ function response() {
 }
 
 describe('/api/whoami', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('returns only whether the canonical identity is a configured admin', async () => {
+    vi.stubEnv('CONFIG_ADMIN_PRINCIPALS', 'other@example.com, Alice@Example.com ');
+    const handler = harness([{ session_user: 'pg-user@example.com', current_user: 'current-role' }]);
+    const req = {
+      header: (name: string) => (name === 'x-forwarded-email' ? 'alice@example.com' : undefined),
+    } as Request;
+    const { res, state } = response();
+
+    await handler?.(req, res);
+
+    expect(state.body?.is_admin).toBe(true);
+    expect(state.body).not.toHaveProperty('admin_principals');
+    expect(JSON.stringify(state.body)).not.toContain('other@example.com');
+    expect(Object.keys(state.body ?? {}).filter((key) => key.includes('admin'))).toEqual(['is_admin']);
+  });
+
   it('uses the forwarded email as the canonical identity', async () => {
     const handler = harness([{ session_user: 'pg-user@example.com', current_user: 'current-role' }]);
     const req = {

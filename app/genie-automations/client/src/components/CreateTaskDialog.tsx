@@ -15,26 +15,17 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Switch,
 } from '@databricks/appkit-ui/react';
 
 interface CreateTaskDialogProps {
   open: boolean;
   name: string;
   type: string;
-  ingestEnabled: boolean;
-  targetCatalog: string;
-  targetSchema: string;
-  targetTable: string;
   error: string | null;
   creating: boolean;
   onOpenChange: (open: boolean) => void;
   onNameChange: (value: string) => void;
   onTypeChange: (value: string) => void;
-  onIngestEnabledChange: (value: boolean) => void;
-  onTargetCatalogChange: (value: string) => void;
-  onTargetSchemaChange: (value: string) => void;
-  onTargetTableChange: (value: string) => void;
   onCreate: () => void;
 }
 
@@ -69,38 +60,11 @@ export function CreateTaskDialog(props: CreateTaskDialogProps) {
               </SelectContent>
             </Select>
           </div>
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="ingest-enabled">This automation collects &amp; stores data</Label>
-            <Switch id="ingest-enabled" checked={props.ingestEnabled} onCheckedChange={props.onIngestEnabledChange} />
-          </div>
-          {props.ingestEnabled && (
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="target-catalog">Target catalog</Label>
-                <Input
-                  id="target-catalog"
-                  value={props.targetCatalog}
-                  onChange={(event) => props.onTargetCatalogChange(event.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="target-schema">Target schema</Label>
-                <Input
-                  id="target-schema"
-                  value={props.targetSchema}
-                  onChange={(event) => props.onTargetSchemaChange(event.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="target-table">Target table</Label>
-                <Input
-                  id="target-table"
-                  value={props.targetTable}
-                  onChange={(event) => props.onTargetTableChange(event.target.value)}
-                />
-              </div>
-            </div>
-          )}
+          <Alert>
+            <AlertDescription>
+              After creation, this automation will await an administrator to bind an approved destination. You can then configure ingest and validation settings.
+            </AlertDescription>
+          </Alert>
           {props.error && (
             <Alert variant="destructive">
               <AlertDescription>{props.error}</AlertDescription>

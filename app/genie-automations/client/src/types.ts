@@ -25,6 +25,45 @@ export interface Task {
   org_id: string;
   role: 'owner' | 'member' | null;
   member_count: number;
+  governance_status: 'unbound' | 'awaiting_approval' | 'active' | 'retired';
+}
+
+export interface Whoami {
+  identity: string | null;
+  isAdmin: boolean;
+}
+
+export interface OwnerSettings {
+  ingest_enabled: boolean;
+  validation_thresholds: {
+    over_allocation_ceiling: number;
+    structural_confidence_floor: number;
+  };
+  header_aliases: Record<string, string[]>;
+}
+
+export interface TaskConfig {
+  version_hash: string | null;
+  active_version_hash: string | null;
+  settings: OwnerSettings | null;
+  active_settings: OwnerSettings | null;
+  status: 'draft' | 'published' | 'retired' | null;
+  dest_catalog: string | null;
+  dest_schema: string | null;
+  dest_table: string | null;
+  binding_status: 'pending' | 'active' | 'retired' | null;
+  active: boolean | null;
+}
+
+export interface ConfigRequest {
+  task_id: string;
+  name: string;
+  task_type: string;
+  binding_id: string | null;
+  binding_status: 'pending' | 'active' | null;
+  version_hash: string | null;
+  config_status: 'draft' | 'published' | null;
+  created_by: string | null;
 }
 
 export interface ParsePreview {

@@ -39,6 +39,7 @@ interface ChatViewProps {
   busy: boolean;
   input: string;
   canIngest: boolean;
+  ingestDisabledReason: string;
   scrollRef: RefObject<HTMLDivElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onInputChange: (value: string) => void;
@@ -51,6 +52,7 @@ export function ChatView({
   busy,
   input,
   canIngest,
+  ingestDisabledReason,
   scrollRef,
   fileInputRef,
   onInputChange,
@@ -123,7 +125,7 @@ export function ChatView({
           title={
             canIngest
               ? 'Upload CSV or Excel for a safe preview'
-              : 'Enable ingest and bind a catalog, schema, and table first'
+              : ingestDisabledReason
           }
           onClick={() => fileInputRef.current?.click()}
         >
