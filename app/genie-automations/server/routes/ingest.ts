@@ -286,15 +286,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const actor = actorOf(req);
         if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
         const parseId = idSchema.parse(req.params.parseId);
-        const db = appkit.lakebase;
-        const record = await db.query(
-          `SELECT ir.run_id, ir.status, ir.parser_version FROM ${SCHEMA}.ingest_run ir
-             JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
-            WHERE ir.parse_id=$1 AND tm.user_id=$2`,
-          [parseId, actor]
+        const record = await appkit.lakebase.query(
+          `SELECT task_id, run_id, status, parser_version FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`,
+          [parseId]
         );
         const row = record.rows[0];
         if (!row) return friendlyFailure(res, 403, 'You cannot view this parse run.');
+        const membership = await appkit.lakebase.asUser(req).query(
+          `SELECT 1 FROM ${SCHEMA}.task_member WHERE task_id=$1 AND lower(user_id)=lower($2)`,
+          [row['task_id'], actor]
+        );
+        if (!membership.rows[0]) return friendlyFailure(res, 403, 'You cannot view this parse run.');
         if (row['parser_version'] === 'vision-v1') {
           const status = row['status'] === 'succeeded' ? 'succeeded' : row['status'] === 'failed' ? 'failed' : 'running';
           return res.json({ parse_id: parseId, run_id: 0, status });
@@ -307,7 +309,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           const output = await appkit.jobs('default').getRunOutput(runId);
           if (!output.ok) throw new Error('parse output unavailable');
         }
-        await db.query(`UPDATE ${SCHEMA}.ingest_run SET status=$2, updated_at=now() WHERE parse_id=$1`, [
+        await appkit.lakebase.query(`UPDATE ${SCHEMA}.ingest_run SET status=$2, updated_at=now() WHERE parse_id=$1`, [
           parseId,
           status,
         ]);
@@ -329,13 +331,18 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
         const parseId = idSchema.parse(req.params.parseId);
         const record = await appkit.lakebase.query(
-          `SELECT ir.artifact_ref FROM ${SCHEMA}.ingest_run ir
-             JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
-            WHERE ir.parse_id=$1 AND tm.user_id=$2`,
-          [parseId, actor]
+          `SELECT task_id, artifact_ref FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`,
+          [parseId]
         );
-        const artifact = record.rows[0]?.['artifact_ref'];
-        if (typeof artifact !== 'string') return friendlyFailure(res, 403, 'You cannot view this preview.');
+        const row = record.rows[0];
+        if (!row) return friendlyFailure(res, 403, 'You cannot view this preview.');
+        const membership = await appkit.lakebase.asUser(req).query(
+          `SELECT 1 FROM ${SCHEMA}.task_member WHERE task_id=$1 AND lower(user_id)=lower($2)`,
+          [row['task_id'], actor]
+        );
+        const artifact = row?.['artifact_ref'];
+        if (!membership.rows[0] || typeof artifact !== 'string')
+          return friendlyFailure(res, 403, 'You cannot view this preview.');
         const body = await appkit
           .files('files')
           .asUser(req)
