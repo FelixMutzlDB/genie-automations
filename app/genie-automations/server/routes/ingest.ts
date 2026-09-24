@@ -369,7 +369,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           return friendlyFailure(res, 400, 'We could not safely stage those rows. Nothing was changed.');
         }
         const run = await userDb.query(
-          `SELECT ir.task_id, ir.artifact_ref, ir.config_version, ir.sha256
+          `SELECT ir.task_id, ir.artifact_ref, ir.config_version, ir.sha256, ir.parser_version
              FROM ${SCHEMA}.ingest_run ir
             WHERE ir.parse_id=$1 AND ir.requested_by=$2`,
           [candidateParseId.data, actor]
@@ -419,10 +419,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const storedSourceSha = runRow?.['sha256'];
         if (typeof storedSourceSha !== 'string' || artifact.sha256 !== storedSourceSha)
           throw new Error('artifact source SHA-256 does not match its ingest run');
-        if (artifact.extraction_kind === 'probabilistic_image' || artifact.requires_human_confirmation) {
+        const trustedParserVersion = runRow?.['parser_version'];
+        if (trustedParserVersion !== PARSER_VERSION && trustedParserVersion !== 'vision-v1')
+          throw new Error('unknown ingest parser version');
+        if (trustedParserVersion === 'vision-v1') {
           const acknowledgement = body.human_review_acknowledgement;
           const recomputedArtifactHash = calculateArtifactHash(artifactValue);
           if (
+            artifact.modality !== 'image' ||
+            artifact.extraction_kind !== 'probabilistic_image' ||
+            artifact.requires_human_confirmation !== true ||
+            typeof artifact.artifact_hash !== 'string' ||
             !acknowledgement ||
             acknowledgement.parse_id !== artifact.parse_id ||
             acknowledgement.artifact_hash !== artifact.artifact_hash ||
