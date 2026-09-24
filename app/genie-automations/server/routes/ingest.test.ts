@@ -48,6 +48,7 @@ function harness(
   gate: Record<string, unknown>,
   options: {
     exists?: boolean;
+    existsError?: unknown;
     uploadError?: unknown;
     appRows?: Record<string, unknown>[];
     userRows?: Record<string, unknown>[];
@@ -82,7 +83,9 @@ function harness(
   const upload = options.uploadError
     ? vi.fn().mockRejectedValue(options.uploadError)
     : vi.fn().mockResolvedValue(undefined);
-  const exists = vi.fn().mockResolvedValue(options.exists ?? false);
+  const exists = options.existsError
+    ? vi.fn().mockRejectedValue(options.existsError)
+    : vi.fn().mockResolvedValue(options.exists ?? false);
   const read = vi.fn().mockResolvedValue(options.artifact ?? '{"status":"ready"}');
   const landedBytes = options.landedBytes ?? Buffer.from('remittance_id,invoice_id,amount,pay_date\nR1,I1,10.00,2026-01-01\n');
   const download = vi.fn().mockResolvedValue({
@@ -153,6 +156,32 @@ describe('ingest upload route', () => {
     expect(runNow).not.toHaveBeenCalled();
   });
 
+  it('explains that an unbound automation needs admin governance setup', async () => {
+    const { handlers } = harness({});
+    resolverMocks.activeConfigHash.mockRejectedValue(
+      new ConfigResolutionError('unbound', 'This automation is awaiting admin configuration.', 409)
+    );
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), res);
+    expect(state.status).toBe(409);
+    expect(state.body).toEqual({
+      error:
+        'This automation is not set up for uploads yet. Ask an admin to approve its destination and publish an ingest-enabled configuration.',
+    });
+  });
+
+  it('explains OBO Volume access failures without exposing the platform error', async () => {
+    const platformError = Object.assign(new Error('raw platform detail'), { statusCode: 403 });
+    const { handlers, runNow } = harness({}, { existsError: platformError });
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), res);
+    expect(state.status).toBe(403);
+    expect(state.body).toEqual({
+      error: 'You do not have access to the upload location. Ask an admin to grant you access, then try again.',
+    });
+    expect(runNow).not.toHaveBeenCalled();
+  });
+
   it('fails closed before database, Volume, or Job access without a verified identity', async () => {
     const { handlers, appQuery, upload, runNow } = harness({});
     const { res, state } = response();
@@ -212,7 +241,8 @@ describe('ingest upload route', () => {
             : undefined) as Request['header'];
     const { res, state } = response();
     await handlers.get('POST /api/ingest/:taskId/upload')?.(req, res);
-    expect(state.status).toBe(500);
+    expect(state.status).toBe(422);
+    expect(state.body).toEqual({ error: 'The file could not be read safely. Check the file and try again.' });
     expect(download).toHaveBeenCalledOnce();
     expect(imageMocks.extractImage).not.toHaveBeenCalled();
   });
@@ -246,7 +276,8 @@ describe('ingest upload route', () => {
     const { handlers, runNow } = harness({}, { landedBytes: body, storedSha: 'f'.repeat(64) });
     const result = response();
     await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), result.res);
-    expect(result.state.status).toBe(500);
+    expect(result.state.status).toBe(422);
+    expect(result.state.body).toEqual({ error: 'The file could not be read safely. Check the file and try again.' });
     expect(runNow).not.toHaveBeenCalled();
   });
 
