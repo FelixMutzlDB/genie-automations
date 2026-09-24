@@ -1,4 +1,5 @@
 import { Application, Request, Response } from 'express';
+import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { clientSafeError, clientSafeSqlstate, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
 import { setupTaskRoutes } from './tasks';
@@ -157,6 +158,40 @@ describe('task routes', () => {
     await handlers.get('POST /api/tasks/:id/join')?.(request({ params: { id: 'vendor-bank-eu' } }), res);
 
     expect(state.body).toMatchObject({ role: 'owner' });
+  });
+
+  it('logs join failures with context and returns a safe structured error', async () => {
+    const dbError = Object.assign(new Error('private database details'), { code: '42501' });
+    const { handlers, query } = routeHarness();
+    query.mockRejectedValueOnce(dbError);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { res, state } = response();
+
+    await handlers.get('POST /api/tasks/:id/join')?.(
+      request({
+        params: { id: 'vendor-bank-eu' },
+        header: ((name: string) =>
+          ({ 'x-forwarded-email': 'alice@example.com', 'x-request-id': 'request-123' })[name]) as Request['header'],
+      }),
+      res
+    );
+
+    expect(log).toHaveBeenCalledWith('Task join failed', {
+        request_id: 'request-123',
+        actor: 'alice@example.com',
+        task_id: 'vendor-bank-eu',
+        sqlstate: '42501',
+      });
+    expect(inspect(log.mock.calls)).not.toContain('private database details');
+    expect(state.status).toBe(500);
+    expect(state.body).toEqual({
+      ok: false,
+      code: 'JOIN_FAILED',
+      error: 'Unable to join this automation right now.',
+      request_id: 'request-123',
+    });
+    expect(JSON.stringify(state.body)).not.toContain('private database details');
+    log.mockRestore();
   });
 
   it('rejects an unauthorized task_id before listing proposals', async () => {

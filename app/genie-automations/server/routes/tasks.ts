@@ -29,6 +29,15 @@ function actorOf(req: Request): string {
   return req.header('x-forwarded-email') ?? 'unknown';
 }
 
+function requestIdOf(req: Request): string {
+  return req.header('x-request-id') ?? req.header('x-databricks-request-id') ?? 'unavailable';
+}
+
+function sqlstateOf(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err) || typeof err.code !== 'string') return undefined;
+  return /^[0-9A-Z]{5}$/.test(err.code) ? err.code : undefined;
+}
+
 function taskIdFor(name: string): string {
   const slug = name
     .toLowerCase()
@@ -145,7 +154,20 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
         }
         res.json({ ok: true, role: result.rows[0]['role'] });
       } catch (err) {
-        res.status(500).json({ error: (err as Error).message });
+        const requestId = requestIdOf(req);
+        const sqlstate = sqlstateOf(err);
+        console.error('Task join failed', {
+          request_id: requestId,
+          actor: userId,
+          task_id: req.params.id,
+          ...(sqlstate ? { sqlstate } : {}),
+        });
+        res.status(500).json({
+          ok: false,
+          code: 'JOIN_FAILED',
+          error: 'Unable to join this automation right now.',
+          request_id: requestId,
+        });
       }
     });
 
