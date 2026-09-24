@@ -31,13 +31,13 @@ const MAX_ANSWER_LENGTH = 800;
 const MAX_SUGGESTION_LENGTH = 180;
 const SAFE_ANSWER_FALLBACK = 'Genie could not provide a safe text response. Try one of the suggested questions.';
 const TECHNICAL_LINE =
-  /(?:\bSQLSTATE\b|\bJDBC\b|\bODBC\b|\b(?:stack\s*trace|traceback)\b|\b(?:request|statement|trace|correlation)_?id\b|\b(?:error_code|error_class|exception)\b|\bat\s+[\w$.<>]+\s*\([^)]*:\d+(?::\d+)?\))/i;
+  /(?:\bSQL\s*STATE\b|\bJDBC\b|\bODBC\b|\b(?:stack\s*trace|traceback)\b|\b(?:request|statement|trace|correlation)_?id\b|\b(?:error_code|error_class|exception)\b|\bat\s+[\w$.<>]+\s*\([^)]*:\d+(?::\d+)?\))/i;
 const INTERNAL_FIELD_DUMP = /^\s*["']?[\w.-]+["']?\s*:\s*(?:["'{[]|null\b|true\b|false\b|-?\d)/i;
 const SQL_STATEMENT =
-  /(?:^|[.;]\s*)(?:SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|GRANT|REVOKE|CREATE|TRUNCATE|MERGE|EXEC)\b/i;
+  /\b(?:SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|GRANT|REVOKE|CREATE|TRUNCATE|MERGE|EXEC)\b(?:[\s\S]{0,80}\b(?:TABLE|DATABASE|SCHEMA|VIEW|INDEX)\b)?/i;
 const PROMPT_INJECTION =
   /(?:ignore\s+(?:all\s+)?(?:previous|prior|the\s+above)\s+instructions|disregard\s+(?:the\s+)?(?:above|previous|prior)(?:\s+instructions)?|(?:act|respond|pretend)\s+as\s+(?:the\s+)?(?:system|assistant|developer)\b|(?:^|\n)\s*(?:system|assistant|developer)\s*:|(?:system|assistant|developer)\s+(?:message|prompt|role)\s*:|<\|(?:system|assistant|developer)\|>|you\s+are\s+now\s+(?:the\s+)?(?:system|assistant|developer)\b)/i;
-const SAFE_SUGGESTION_CHARACTERS = /^[\p{Script=Latin}0-9 ?.,'’()%$&/\-:]+$/u;
+const SAFE_SUGGESTION_CHARACTERS = /^[A-Za-z0-9àáâãäåæçèéêëìíîïðñòóôõöøœùúûüýÿßÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØŒÙÚÛÜÝŸ ?.,'’()%$&/\-:]+$/u;
 
 function removeJsonBlobs(value: string): string {
   let output = value;
@@ -49,11 +49,20 @@ function removeJsonBlobs(value: string): string {
   return output;
 }
 
-function normalizeVisibleText(value: unknown): string {
+function normalizeSuggestion(value: unknown): string {
   if (typeof value !== 'string') return '';
   return value
     .normalize('NFKC')
     .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function normalizeContent(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .normalize('NFKC')
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim();
 }
@@ -63,7 +72,7 @@ function codePointSlice(value: string, maximum: number): string {
 }
 
 export function sanitizeGenieSuggestion(value: unknown): string {
-  const normalized = normalizeVisibleText(value);
+  const normalized = normalizeSuggestion(value);
   if (!normalized || Array.from(normalized).length > MAX_SUGGESTION_LENGTH) return '';
   if (!SAFE_SUGGESTION_CHARACTERS.test(normalized)) return '';
   if (
@@ -75,8 +84,20 @@ export function sanitizeGenieSuggestion(value: unknown): string {
   return normalized;
 }
 
+export function submitGenieSuggestion(
+  value: unknown,
+  busy: boolean,
+  sendMessage: (suggestion: string) => void
+): boolean {
+  if (busy) return false;
+  const safeSuggestion = sanitizeGenieSuggestion(value);
+  if (!safeSuggestion) return false;
+  sendMessage(safeSuggestion);
+  return true;
+}
+
 export function sanitizeGenieText(value: unknown, fallback = '', maxLength = MAX_ANSWER_LENGTH): string {
-  const normalized = normalizeVisibleText(value);
+  const normalized = normalizeContent(value);
   if (!normalized) return fallback;
   const boundedInput = codePointSlice(normalized, maxLength * 4);
   if (SQL_STATEMENT.test(boundedInput) || PROMPT_INJECTION.test(boundedInput)) return fallback;

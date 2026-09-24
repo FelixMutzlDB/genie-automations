@@ -27,7 +27,7 @@ import {
   useGenieChat,
 } from '@databricks/appkit-ui/react';
 import { ChevronDown, Send } from 'lucide-react';
-import { presentGenieMessage } from '../lib/geniePresentation';
+import { presentGenieMessage, submitGenieSuggestion } from '../lib/geniePresentation';
 
 const SOURCE = 'felix_demo_catalog.genie-automations.receivables_committed';
 const FRIENDLY_ERROR = "I couldn't reach Genie just now. Your question wasn't changed — please try again.";
@@ -59,7 +59,7 @@ export function GenieTab({ identity, active = true }: { identity: string | null;
   };
 
   const askSuggestedQuestion = (suggestion: string) => {
-    if (!busy) sendMessage(suggestion);
+    submitGenieSuggestion(suggestion, busy, sendMessage);
   };
 
   return (
