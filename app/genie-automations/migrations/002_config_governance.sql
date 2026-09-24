@@ -120,14 +120,33 @@ END $$;
 
 CREATE OR REPLACE FUNCTION genie_spike.approve_destination_binding(p_task_id TEXT,p_binding_id UUID)
 RETURNS SETOF genie_spike.destination_binding
-LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,genie_spike AS $$
-  WITH approved AS (UPDATE genie_spike.destination_binding SET status='active',approved_by=session_user,approved_at=now()
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,genie_spike AS $$
+DECLARE pending genie_spike.destination_binding%ROWTYPE;
+DECLARE approved genie_spike.destination_binding%ROWTYPE;
+BEGIN
+  -- Serialize all rotations for a task. A failed checker test returns before
+  -- retiring the live binding, and any later failure rolls the transaction back.
+  PERFORM 1 FROM genie_spike.task WHERE task_id=p_task_id FOR UPDATE;
+  SELECT * INTO pending FROM genie_spike.destination_binding
     WHERE task_id=p_task_id AND binding_id=p_binding_id AND status='pending'
-      AND lower(proposed_by)<>lower(session_user) RETURNING *),
-  activity AS (INSERT INTO genie_spike.task_activity(task_id,user_id,action,status,detail)
-    SELECT approved.task_id,session_user,'binding_approved','success',jsonb_build_object('binding_id',approved.binding_id)
-    FROM approved)
-  SELECT * FROM approved
+      AND lower(proposed_by)<>lower(session_user)
+    FOR UPDATE;
+  IF pending.binding_id IS NULL THEN RETURN; END IF;
+
+  UPDATE genie_spike.destination_binding
+    SET status='retired',retired_at=now()
+    WHERE task_id=p_task_id AND status='active';
+
+  UPDATE genie_spike.destination_binding
+    SET status='active',approved_by=session_user,approved_at=now()
+    WHERE task_id=p_task_id AND binding_id=p_binding_id AND status='pending'
+    RETURNING * INTO approved;
+
+  INSERT INTO genie_spike.task_activity(task_id,user_id,action,status,detail)
+    VALUES(approved.task_id,session_user,'binding_approved','success',
+      jsonb_build_object('binding_id',approved.binding_id));
+  RETURN NEXT approved;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION genie_spike.save_config_draft(p_task_id TEXT,p_settings JSONB)

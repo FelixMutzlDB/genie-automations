@@ -17,6 +17,23 @@ describe('config governance database contract', () => {
     expect(migration).toContain('approved_by IS DISTINCT FROM created_by');
   });
 
+  it('atomically rotates an existing active binding before approving its replacement', () => {
+    const functionBody = migration.match(/FUNCTION genie_spike\.approve_destination_binding[^]*?\$\$([^]*?)\$\$;/)?.[1];
+    expect(functionBody).toBeDefined();
+    expect(functionBody).toContain('WHERE task_id=p_task_id FOR UPDATE');
+    expect(functionBody).toContain("status='pending'");
+    expect(functionBody).toContain('lower(proposed_by)<>lower(session_user)');
+    expect(functionBody).toContain('IF pending.binding_id IS NULL THEN RETURN; END IF');
+
+    const retire = functionBody?.indexOf("SET status='retired',retired_at=now()");
+    const activate = functionBody?.indexOf("SET status='active',approved_by=session_user,approved_at=now()");
+    expect(retire).toBeGreaterThan(0);
+    expect(activate).toBeGreaterThan(retire ?? Number.MAX_SAFE_INTEGER);
+    expect(functionBody).toContain("WHERE task_id=p_task_id AND status='active'");
+    expect(functionBody).toContain("binding_id=p_binding_id AND status='pending'");
+    expect(migration).toContain("ON genie_spike.destination_binding(task_id) WHERE status='active'");
+  });
+
   it('is additive and leaves the guarded mutation procedures untouched', () => {
     expect(migration).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i);
     expect(migration).not.toMatch(
