@@ -104,11 +104,15 @@ describe('config admin route authorization', () => {
     const { res, state } = response();
 
     await handlers.get('POST /api/admin/tasks/:id/bindings')?.(
-      request('ADMIN@example.com', { id: 'task-1' }, {
-        dest_catalog: 'catalog',
-        dest_schema: 'schema',
-        dest_table: 'table',
-      }),
+      request(
+        'ADMIN@example.com',
+        { id: 'task-1' },
+        {
+          dest_catalog: 'catalog',
+          dest_schema: 'schema',
+          dest_table: 'table',
+        }
+      ),
       res
     );
 
@@ -196,9 +200,12 @@ describe('config governance database contract', () => {
     expect(appYaml).toContain('name: LAKEBASE_ENDPOINT\n    valueFrom: postgres');
     expect(appYaml).toContain('name: DATABRICKS_VOLUME_FILES\n    valueFrom: files');
     expect(appYaml).toContain('name: DATABRICKS_JOB_ID\n    valueFrom: job');
+    expect(appYaml).toContain('name: IMAGE_EXTRACTION_ENDPOINT\n    valueFrom: image-extraction-endpoint');
     expect(appYaml).toContain('name: CONFIG_ADMIN_PRINCIPALS\n    valueFrom: config-admin-principals');
     expect(appYaml).toContain('name: CONFIG_DESTINATION_ALLOWLIST\n    valueFrom: config-destination-allowlist');
     expect(bundle).toContain('name: config-admin-principals\n          secret:');
+    expect(bundle).toContain('name: image-extraction-endpoint\n          serving_endpoint:');
+    expect(bundle).toContain('name: databricks-claude-sonnet-4-5\n            permission: CAN_QUERY');
     expect(bundle).toContain('name: config-destination-allowlist\n          secret:');
     expect(bundle).toContain('scope: ${var.config_secret_scope}');
     expect(bundle).toContain('key: ${var.config_admin_principals_secret_key}');

@@ -55,6 +55,10 @@ resources:
           job:
             id: ${resources.jobs.parse_preview.id}
             permission: CAN_MANAGE_RUN
+        - name: image-extraction-endpoint
+          serving_endpoint:
+            name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
         - name: config-admin-principals
           secret:
             scope: ${var.config_secret_scope}
