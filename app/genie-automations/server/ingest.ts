@@ -29,8 +29,8 @@ export function safeExtension(filename: string): IngestExtension | null {
   return extension && ALLOWED_EXTENSIONS.has(extension as IngestExtension) ? (extension as IngestExtension) : null;
 }
 
-export function extractionKind(extension: IngestExtension): ExtractionKind {
-  return extension === 'csv' || extension === 'xlsx' ? 'deterministic' : 'probabilistic_image';
+export function extractionKind(detected: DetectedIngestType): ExtractionKind {
+  return detected === 'csv' || detected === 'xlsx' ? 'deterministic' : 'probabilistic_image';
 }
 
 export function detectIngestType(raw: Buffer): DetectedIngestType | null {

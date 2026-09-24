@@ -5,6 +5,7 @@ import {
   MAX_UPLOAD_BYTES,
   newParseId,
   detectIngestType,
+  extractionKind,
   extensionMatchesDetectedType,
   parseRunStatus,
   safeExtension,
@@ -204,7 +205,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const extension = safeExtension(filename);
         if (!extension || !detectedType || !extensionMatchesDetectedType(extension, detectedType))
           return friendlyFailure(res, 415, 'The file contents do not match its CSV, XLSX, PNG, or JPEG name.');
-        const kind = detectedType === 'png' || detectedType === 'jpeg' ? 'probabilistic_image' : 'deterministic';
+        const kind = extractionKind(detectedType);
 
         const digest = sha256(req.body);
         const relativePath = uploadPath(req.params.taskId, digest, extension);

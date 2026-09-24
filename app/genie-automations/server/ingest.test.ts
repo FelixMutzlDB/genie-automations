@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ingestGateFailure,
   detectIngestType,
+  extractionKind,
   extensionMatchesDetectedType,
   isAlreadyExists,
   parseRunStatus,
@@ -35,6 +36,8 @@ describe('ingest upload identity', () => {
     expect(extensionMatchesDetectedType('jpg', 'jpeg')).toBe(true);
     expect(extensionMatchesDetectedType('jpg', 'png')).toBe(false);
     expect(detectIngestType(Buffer.from('not an image'))).toBeNull();
+    expect(extractionKind('png')).toBe('probabilistic_image');
+    expect(extractionKind('csv')).toBe('deterministic');
   });
 
   it('rejects binary CSV content while allowing UTF-8 and cp1252 text', () => {
