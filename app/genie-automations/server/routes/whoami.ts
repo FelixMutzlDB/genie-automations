@@ -25,6 +25,7 @@ export function setupWhoamiRoute(appkit: AppKitOBO): void {
         const sessionUser = row['session_user'];
         const isHuman = typeof sessionUser === 'string' && sessionUser.includes('@');
         res.json({
+          identity: forwardedEmail ?? (typeof sessionUser === 'string' ? sessionUser : null),
           forwarded_email: forwardedEmail,
           has_forwarded_token: hasToken,
           pg_session_user: sessionUser,

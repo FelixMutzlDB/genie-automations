@@ -159,6 +159,43 @@ describe('task routes', () => {
     expect(state.body).toMatchObject({ role: 'owner' });
   });
 
+  it('logs join failures with context and returns a safe structured error', async () => {
+    const dbError = Object.assign(new Error('private database details'), { code: '42501' });
+    const { handlers, query } = routeHarness();
+    query.mockRejectedValueOnce(dbError);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { res, state } = response();
+
+    await handlers.get('POST /api/tasks/:id/join')?.(
+      request({
+        params: { id: 'vendor-bank-eu' },
+        header: ((name: string) =>
+          ({ 'x-forwarded-email': 'alice@example.com', 'x-request-id': 'request-123' })[name]) as Request['header'],
+      }),
+      res
+    );
+
+    expect(log).toHaveBeenCalledWith(
+      'Task join failed',
+      expect.objectContaining({
+        request_id: 'request-123',
+        actor: 'alice@example.com',
+        task_id: 'vendor-bank-eu',
+        sqlstate: '42501',
+        error: dbError,
+      })
+    );
+    expect(state.status).toBe(500);
+    expect(state.body).toEqual({
+      ok: false,
+      code: 'JOIN_FAILED',
+      error: 'Unable to join this automation right now.',
+      request_id: 'request-123',
+    });
+    expect(JSON.stringify(state.body)).not.toContain('private database details');
+    log.mockRestore();
+  });
+
   it('rejects an unauthorized task_id before listing proposals', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] });
     const handlers = reconHarness(query);
