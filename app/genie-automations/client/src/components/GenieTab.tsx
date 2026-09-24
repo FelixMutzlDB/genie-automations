@@ -30,7 +30,14 @@ import { ChevronDown, Send } from 'lucide-react';
 import { presentGenieMessage } from '../lib/geniePresentation';
 
 const SOURCE = 'felix_demo_catalog.genie-automations.receivables_committed';
-const FRIENDLY_ERROR = "I couldn't answer that from the receivables data. Try rephrasing the question.";
+const FRIENDLY_ERROR = "I couldn't reach Genie just now. Your question wasn't changed — please try again.";
+const SUGGESTED_QUESTIONS = [
+  'What is the total remaining outstanding?',
+  'What is the remaining outstanding amount by accounting period?',
+  'How many remittances are not fully allocated?',
+  'Which remittances have the largest remaining outstanding amounts?',
+  'What is the breakdown by period status?',
+] as const;
 
 export function GenieTab({ identity }: { identity: string | null }) {
   const [question, setQuestion] = useState('');
@@ -51,6 +58,10 @@ export function GenieTab({ identity }: { identity: string | null }) {
     setQuestion('');
   };
 
+  const askSuggestedQuestion = (suggestion: string) => {
+    if (!busy) sendMessage(suggestion);
+  };
+
   return (
     <main className="flex-1 min-h-0 overflow-auto p-5" aria-label="Ask data">
       <div className="mx-auto max-w-5xl space-y-4">
@@ -67,7 +78,7 @@ export function GenieTab({ identity }: { identity: string | null }) {
         <form className="flex gap-2" onSubmit={ask}>
           <Input
             aria-label="Receivables question"
-            placeholder="For example: Which subsidiaries have the largest unallocated balances?"
+            placeholder="For example: What is the total remaining outstanding?"
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
             disabled={busy}
@@ -76,6 +87,22 @@ export function GenieTab({ identity }: { identity: string | null }) {
             <Send className="h-4 w-4" /> Ask
           </Button>
         </form>
+
+        {!busy && !answer && status !== 'error' && (
+          <div className="flex flex-wrap gap-2" aria-label="Suggested receivables questions">
+            {SUGGESTED_QUESTIONS.map((suggestion) => (
+              <Button
+                key={suggestion}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => askSuggestedQuestion(suggestion)}
+              >
+                {suggestion}
+              </Button>
+            ))}
+          </div>
+        )}
 
         {status === 'error' && (
           <Alert variant="destructive">
@@ -110,16 +137,47 @@ export function GenieTab({ identity }: { identity: string | null }) {
 
         {!busy && answer && (
           <div className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Answer</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="whitespace-pre-wrap">{answer.answer}</p>
-              </CardContent>
-            </Card>
+            {answer.kind === 'clarification' ? (
+              <Alert>
+                <AlertDescription>
+                  <span className="font-medium">Genie needs a little more detail.</span>{' '}
+                  <span className="whitespace-pre-wrap">{answer.answer}</span>{' '}
+                  <span className="text-muted-foreground">
+                    This data covers remittances, accounting periods, allocation amounts and statuses, and remaining amounts.
+                  </span>
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Answer</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="whitespace-pre-wrap">{answer.answer}</p>
+                </CardContent>
+              </Card>
+            )}
 
-            {answer.columns.length > 0 && answer.rows.length > 0 ? (
+            {answer.suggestedQuestions.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-sm font-medium">You could ask:</p>
+                <div className="flex flex-wrap gap-2">
+                  {answer.suggestedQuestions.map((suggestion) => (
+                    <Button
+                      key={suggestion}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => askSuggestedQuestion(suggestion)}
+                    >
+                      {suggestion}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {answer.kind === 'answer' && answer.columns.length > 0 && answer.rows.length > 0 ? (
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Results</CardTitle>
@@ -144,14 +202,14 @@ export function GenieTab({ identity }: { identity: string | null }) {
                   </Table>
                 </CardContent>
               </Card>
-            ) : (
+            ) : answer.kind === 'answer' ? (
               <Empty>
                 <EmptyHeader>
                   <EmptyTitle>No result rows</EmptyTitle>
                   <EmptyDescription>Genie answered without a table. Try asking for a specific breakdown.</EmptyDescription>
                 </EmptyHeader>
               </Empty>
-            )}
+            ) : null}
 
             {answer.sql && (
               <Collapsible>

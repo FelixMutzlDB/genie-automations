@@ -39,4 +39,19 @@ describe('AppKit Genie read path', () => {
     expect(geniePlugin).toContain('this.asUser(req)._handleGetConversation');
     expect(geniePlugin).not.toMatch(forbiddenMutationPaths);
   });
+
+  it('keeps Co-worker errors inside that tab and clears them on tab changes', () => {
+    const client = readFileSync(new URL('../client/src/App.tsx', import.meta.url), 'utf8');
+    const coWorkerTab = client.slice(
+      client.indexOf('<TabsContent value="co-worker"'),
+      client.indexOf('<TabsContent value="ask-data"')
+    );
+    const askDataTab = client.slice(client.indexOf('<TabsContent value="ask-data"'));
+
+    expect(client).toContain('const [coWorkerError, setCoWorkerError]');
+    expect(client).toContain('onValueChange={(value) => {');
+    expect(client).toContain('setCoWorkerError(null);');
+    expect(coWorkerTab).toContain('{coWorkerError && (');
+    expect(askDataTab).not.toContain('coWorkerError');
+  });
 });

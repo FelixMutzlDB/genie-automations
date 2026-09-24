@@ -4,6 +4,8 @@ export interface GeniePresentationMessage {
   attachments: Array<{
     attachmentId?: string;
     query?: { query?: string };
+    text?: { content?: string };
+    suggestedQuestions?: string[];
   }>;
   queryResults: Map<
     string,
@@ -16,9 +18,11 @@ export interface GeniePresentationMessage {
 
 export interface PresentedAnswer {
   answer: string;
+  kind: 'answer' | 'clarification';
   sql: string | null;
   columns: string[];
   rows: (string | null)[][];
+  suggestedQuestions: string[];
 }
 
 export function presentGenieMessage(message: GeniePresentationMessage | undefined): PresentedAnswer | null {
@@ -29,8 +33,10 @@ export function presentGenieMessage(message: GeniePresentationMessage | undefine
     : undefined;
   return {
     answer: message.content,
+    kind: queryAttachment ? 'answer' : 'clarification',
     sql: queryAttachment?.query?.query ?? null,
     columns: result?.manifest.schema.columns.map((column) => column.name) ?? [],
     rows: result?.result.data_array ?? [],
+    suggestedQuestions: message.attachments.flatMap((attachment) => attachment.suggestedQuestions ?? []),
   };
 }

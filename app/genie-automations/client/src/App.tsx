@@ -88,6 +88,8 @@ export default function App() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [coWorkerError, setCoWorkerError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('co-worker');
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState('allocation_upsert');
@@ -446,7 +448,7 @@ export default function App() {
       chatControllerRef.current?.abort();
       chatControllerRef.current = controller;
       setInput('');
-      setPageError(null);
+      setCoWorkerError(null);
       setBusy(true);
       setMessagesByTask((all) => ({ ...all, [taskId]: [...(all[taskId] ?? [START_MESSAGE]), { role: 'you', text }] }));
       try {
@@ -459,7 +461,7 @@ export default function App() {
         const data = (await response.json()) as ChatResponse;
         if (controller.signal.aborted || selectedTaskIdRef.current !== taskId) return;
         if (!response.ok || data.error) {
-          setPageError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
+          setCoWorkerError(friendlyError(data.sqlstate, FRIENDLY_CHAT_ERROR));
         } else {
           setMessagesByTask((all) => ({
             ...all,
@@ -479,7 +481,7 @@ export default function App() {
         }
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || selectedTaskIdRef.current !== taskId) return;
-        setPageError(FRIENDLY_CHAT_ERROR);
+        setCoWorkerError(FRIENDLY_CHAT_ERROR);
       } finally {
         if (chatControllerRef.current === controller) {
           chatControllerRef.current = null;
@@ -575,12 +577,24 @@ export default function App() {
               </Empty>
             </div>
           ) : (
-            <Tabs defaultValue="co-worker" className="flex flex-1 min-h-0 flex-col">
+            <Tabs
+              value={activeTab}
+              onValueChange={(value) => {
+                setActiveTab(value);
+                setCoWorkerError(null);
+              }}
+              className="flex flex-1 min-h-0 flex-col"
+            >
               <TabsList className="mx-5 mt-3 w-fit">
                 <TabsTrigger value="co-worker">Co-worker</TabsTrigger>
                 {canAskData && <TabsTrigger value="ask-data">Ask data</TabsTrigger>}
               </TabsList>
               <TabsContent value="co-worker" className="flex-1 min-h-0 mt-3">
+                {coWorkerError && (
+                  <Alert variant="destructive" className="mx-5 mb-3 w-auto">
+                    <AlertDescription>{coWorkerError}</AlertDescription>
+                  </Alert>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] h-full min-h-0">
                   <ChatView
                     messages={messages}
