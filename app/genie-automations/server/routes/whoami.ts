@@ -14,7 +14,7 @@ interface AppKitOBO {
   server: { extend(fn: (app: Application) => void): void };
 }
 
-function isConfigAdmin(identity: string | null): boolean {
+export function isConfigAdmin(identity: string | null): boolean {
   if (!identity) return false;
   const admins = (process.env['CONFIG_ADMIN_PRINCIPALS'] ?? '')
     .split(',')
