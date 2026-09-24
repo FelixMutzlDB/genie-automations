@@ -18,7 +18,9 @@ import { CreateTaskDialog } from './components/CreateTaskDialog';
 import { DetailsPanel } from './components/DetailsPanel';
 import { IngestDialog } from './components/IngestDialog';
 import { TaskContext } from './TaskContext';
-import { loadCanonicalIdentity } from './lib/identity';
+import { loadWhoami } from './lib/identity';
+import { loadTaskConfig } from './lib/configGovernance';
+import { canUseIngest } from './lib/governanceState';
 import { joinAndReloadTasks } from './lib/joinTask';
 import {
   abortableDelay,
@@ -70,6 +72,7 @@ function isAbortError(error: unknown): boolean {
 export default function App() {
   const [identity, setIdentity] = useState<string | null>(null);
   const [identityResolved, setIdentityResolved] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY));
@@ -83,10 +86,7 @@ export default function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState('allocation_upsert');
-  const [ingestEnabled, setIngestEnabled] = useState(false);
-  const [targetCatalog, setTargetCatalog] = useState('');
-  const [targetSchema, setTargetSchema] = useState('');
-  const [targetTable, setTargetTable] = useState('');
+  const [governedIngestEnabled, setGovernedIngestEnabled] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -194,7 +194,9 @@ export default function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        setIdentity(await loadCanonicalIdentity(fetch, controller.signal));
+        const whoami = await loadWhoami(fetch, controller.signal);
+        setIdentity(whoami.identity);
+        setIsAdmin(whoami.isAdmin);
       } catch (error) {
         if (!isAbortError(error)) setIdentity(null);
       } finally {
@@ -222,6 +224,21 @@ export default function App() {
     }
     return undefined;
   }, [refreshTaskViews, selectedTaskId]);
+  useEffect(() => {
+    setGovernedIngestEnabled(false);
+    if (!selectedTask) return undefined;
+    const controller = new AbortController();
+    void loadTaskConfig(selectedTask.task_id, (input, init) =>
+      fetch(input, { ...init, signal: controller.signal })
+    )
+      .then((config) => {
+        if (!controller.signal.aborted) setGovernedIngestEnabled(canUseIngest(selectedTask, config));
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && !isAbortError(error)) setGovernedIngestEnabled(false);
+      });
+    return () => controller.abort();
+  }, [selectedTask?.task_id, selectedTask?.governance_status]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
   }, [messages]);
@@ -267,10 +284,6 @@ export default function App() {
       setCreateError('Give this automation a name.');
       return;
     }
-    if (ingestEnabled && (!targetCatalog.trim() || !targetSchema.trim() || !targetTable.trim())) {
-      setCreateError('Add a target catalog, schema, and table.');
-      return;
-    }
     setCreating(true);
     setCreateError(null);
     try {
@@ -280,35 +293,22 @@ export default function App() {
         body: JSON.stringify({
           name: createName.trim(),
           task_type: createType,
-          ingest_enabled: ingestEnabled,
-          target_catalog: ingestEnabled ? targetCatalog.trim() : null,
-          target_schema: ingestEnabled ? targetSchema.trim() : null,
-          target_table: ingestEnabled ? targetTable.trim() : null,
         }),
       });
       if (!response.ok) throw new Error('create');
       const task = (await response.json()) as Task;
       setCreateOpen(false);
       setCreateName('');
-      setIngestEnabled(false);
-      setTargetCatalog('');
-      setTargetSchema('');
-      setTargetTable('');
       await loadTasks(task.task_id);
-      setNotice('Automation created.');
+      setNotice('Automation created — awaiting admin binding. An administrator must bind a destination and publish its configuration.');
     } catch {
       setCreateError("We couldn't create that automation. Check the details and try again.");
     } finally {
       setCreating(false);
     }
-  }, [createName, createType, ingestEnabled, loadTasks, targetCatalog, targetSchema, targetTable]);
+  }, [createName, createType, loadTasks]);
 
-  const canIngest = Boolean(
-    selectedTask?.ingest_enabled &&
-      selectedTask.target_catalog &&
-      selectedTask.target_schema &&
-      selectedTask.target_table
-  );
+  const canIngest = selectedTask?.governance_status === 'active' && governedIngestEnabled;
 
   const uploadForPreview = useCallback(
     async (file: File) => {
@@ -566,6 +566,7 @@ export default function App() {
                 busy={busy}
                 input={input}
                 canIngest={canIngest}
+                ingestDisabledReason="Upload and staging become available after an admin approves a destination and publishes an ingest-enabled configuration."
                 scrollRef={scrollRef}
                 fileInputRef={fileInputRef}
                 onInputChange={setInput}
@@ -581,6 +582,11 @@ export default function App() {
                 identity={identity}
                 outcomes={outcomes}
                 onAction={(kind, proposal) => void act(kind, proposal)}
+                selectedTask={selectedTask}
+                tasks={tasks}
+                isAdmin={isAdmin}
+                onIngestCapabilityChange={setGovernedIngestEnabled}
+                onGovernanceChanged={() => void loadTasks(selectedTask.task_id)}
               />
             </div>
           )}
@@ -588,19 +594,11 @@ export default function App() {
             open={createOpen}
             name={createName}
             type={createType}
-            ingestEnabled={ingestEnabled}
-            targetCatalog={targetCatalog}
-            targetSchema={targetSchema}
-            targetTable={targetTable}
             error={createError}
             creating={creating}
             onOpenChange={setCreateOpen}
             onNameChange={setCreateName}
             onTypeChange={setCreateType}
-            onIngestEnabledChange={setIngestEnabled}
-            onTargetCatalogChange={setTargetCatalog}
-            onTargetSchemaChange={setTargetSchema}
-            onTargetTableChange={setTargetTable}
             onCreate={() => void createTask()}
           />
           <IngestDialog

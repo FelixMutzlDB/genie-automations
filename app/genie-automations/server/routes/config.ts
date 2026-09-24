@@ -67,13 +67,17 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
       const result = await appkit.lakebase.asUser(req).query(
         `SELECT cv.version_hash, cv.payload->'settings' AS settings, cv.status,
                 db.dest_catalog, db.dest_schema, db.dest_table, db.status AS binding_status,
-                (tcs.active_version_hash=cv.version_hash) AS active
+                (tcs.active_version_hash=cv.version_hash) AS active, tcs.active_version_hash,
+                active_cv.payload->'settings' AS active_settings
            FROM ${SCHEMA}.task t
            JOIN ${SCHEMA}.task_member tm ON tm.task_id=t.task_id AND lower(tm.user_id)=lower($2)
            LEFT JOIN ${SCHEMA}.destination_binding db ON db.task_id=t.task_id AND db.status IN ('pending','active')
            LEFT JOIN ${SCHEMA}.config_version cv ON cv.task_id=t.task_id AND cv.status IN ('draft','published')
            LEFT JOIN ${SCHEMA}.task_config_state tcs ON tcs.task_id=t.task_id
-          WHERE t.task_id=$1 ORDER BY cv.created_at DESC NULLS LAST LIMIT 1`,
+           LEFT JOIN ${SCHEMA}.config_version active_cv
+             ON active_cv.task_id=t.task_id AND active_cv.version_hash=tcs.active_version_hash
+          WHERE t.task_id=$1
+          ORDER BY (db.status='active') DESC, cv.created_at DESC NULLS LAST LIMIT 1`,
         [req.params.id, actor]
       );
       if (!result.rows[0]) {
@@ -127,11 +131,23 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
       const result = await appkit.lakebase.asUser(req).query(
         `SELECT t.task_id,t.name,t.task_type,db.binding_id,db.status AS binding_status,
                 cv.version_hash,cv.status AS config_status,cv.created_by
-           FROM ${SCHEMA}.task t LEFT JOIN ${SCHEMA}.destination_binding db ON db.task_id=t.task_id AND db.status='pending'
-           LEFT JOIN ${SCHEMA}.config_version cv ON cv.task_id=t.task_id AND cv.status='draft'
+           FROM ${SCHEMA}.task t
+           LEFT JOIN ${SCHEMA}.task_config_state tcs ON tcs.task_id=t.task_id
+           LEFT JOIN LATERAL (
+             SELECT binding_id,status FROM ${SCHEMA}.destination_binding
+              WHERE task_id=t.task_id AND status IN ('pending','active')
+              ORDER BY proposed_at DESC LIMIT 1
+           ) db ON true
+           LEFT JOIN ${SCHEMA}.config_version cv ON cv.task_id=t.task_id
+             AND (cv.status='draft' OR (cv.status='published' AND cv.version_hash=tcs.active_version_hash))
           WHERE db.binding_id IS NOT NULL OR cv.version_hash IS NOT NULL ORDER BY t.created_at`
       );
       res.json(result.rows);
+    });
+
+    app.get('/api/admin/config-destinations', (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      res.json({ destinations: [...destinationAllowlist()].sort() });
     });
 
     app.post('/api/admin/tasks/:id/bindings', async (req, res) => {

@@ -14,6 +14,15 @@ interface AppKitOBO {
   server: { extend(fn: (app: Application) => void): void };
 }
 
+function isConfigAdmin(identity: string | null): boolean {
+  if (!identity) return false;
+  const admins = (process.env['CONFIG_ADMIN_PRINCIPALS'] ?? '')
+    .split(',')
+    .map((principal) => principal.trim().toLowerCase())
+    .filter(Boolean);
+  return admins.includes(identity.trim().toLowerCase());
+}
+
 export function setupWhoamiRoute(appkit: AppKitOBO): void {
   appkit.server.extend((app) => {
     app.get('/api/whoami', async (req, res) => {
@@ -25,8 +34,10 @@ export function setupWhoamiRoute(appkit: AppKitOBO): void {
         const row = result.rows[0] ?? {};
         const sessionUser = row['session_user'];
         const isHuman = typeof sessionUser === 'string' && sessionUser.includes('@');
+        const identity = canonicalForwardedEmail ?? (typeof sessionUser === 'string' ? sessionUser : null);
         res.json({
-          identity: canonicalForwardedEmail ?? (typeof sessionUser === 'string' ? sessionUser : null),
+          identity,
+          is_admin: isConfigAdmin(identity),
           forwarded_email: forwardedEmail,
           has_forwarded_token: hasToken,
           pg_session_user: sessionUser,

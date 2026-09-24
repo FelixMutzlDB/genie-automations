@@ -55,6 +55,7 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
                   CASE
                     WHEN governance.has_active AND cv.status = 'published' THEN 'active'
                     WHEN governance.has_pending THEN 'awaiting_approval'
+                    WHEN tcs.active_version_hash IS NULL AND retired_config.has_retired THEN 'retired'
                     ELSE 'unbound'
                   END AS governance_status,
                   COUNT(all_members.user_id)::int AS member_count
@@ -69,9 +70,14 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
              ) governance ON true
              LEFT JOIN ${SCHEMA}.task_config_state tcs ON tcs.task_id=t.task_id
              LEFT JOIN ${SCHEMA}.config_version cv ON cv.task_id=tcs.task_id AND cv.version_hash=tcs.active_version_hash
+             LEFT JOIN LATERAL (
+               SELECT true AS has_retired FROM ${SCHEMA}.config_version retired
+                WHERE retired.task_id=t.task_id AND retired.status='retired' LIMIT 1
+             ) retired_config ON true
             WHERE t.status = 'active' AND t.org_id = 'org-demo'
             GROUP BY t.task_id, t.name, t.task_type, t.org_id, tm.role,
-                     governance.has_active, governance.has_pending, cv.status
+                     governance.has_active, governance.has_pending, cv.status,
+                     tcs.active_version_hash, retired_config.has_retired
             ORDER BY t.created_at DESC`,
           [userId]
         );
