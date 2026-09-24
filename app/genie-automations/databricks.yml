@@ -11,10 +11,15 @@ variables:
   uploads_volume_full_name:
     description: Three-level name of the existing Unity Catalog Volume used for immutable uploads and parse previews.
     default: felix_demo_catalog.genie-automations.raw_uploads
-  config_admin_principals:
-    description: Comma-separated trusted user/group principals allowed to govern config.
-  config_destination_allowlist:
-    description: Comma-separated fully-qualified deployment-approved destinations.
+  config_secret_scope:
+    description: Databricks secret scope containing deploy-time runtime configuration.
+    default: genie-automations-config
+  config_admin_principals_secret_key:
+    description: Secret key containing comma-separated trusted user/group principals allowed to govern config.
+    default: admin-principals
+  config_destination_allowlist_secret_key:
+    description: Secret key containing comma-separated fully-qualified deployment-approved destinations.
+    default: destination-allowlist
 
 resources:
   apps:
@@ -50,6 +55,16 @@ resources:
           job:
             id: ${resources.jobs.parse_preview.id}
             permission: CAN_MANAGE_RUN
+        - name: config-admin-principals
+          secret:
+            scope: ${var.config_secret_scope}
+            key: ${var.config_admin_principals_secret_key}
+            permission: READ
+        - name: config-destination-allowlist
+          secret:
+            scope: ${var.config_secret_scope}
+            key: ${var.config_destination_allowlist_secret_key}
+            permission: READ
 
   jobs:
     parse_preview:
