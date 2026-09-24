@@ -182,17 +182,54 @@ function friendlyFailure(res: Response, status: number, message: string): void {
   res.status(status).json({ error: message });
 }
 
+type UploadStage = 'governance' | 'validation' | 'volume' | 'record' | 'verification' | 'parser';
+
+function errorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const value = (error as Record<string, unknown>)['statusCode'] ?? (error as Record<string, unknown>)['status'];
+  return typeof value === 'number' ? value : undefined;
+}
+
+export function uploadFailure(error: unknown, stage: UploadStage): { status: number; message: string } {
+  if (error instanceof ConfigResolutionError) {
+    if (['unbound', 'config_not_published', 'config_not_active', 'binding_not_active'].includes(error.code)) {
+      return {
+        status: error.status,
+        message:
+          'This automation is not set up for uploads yet. Ask an admin to approve its destination and publish an ingest-enabled configuration.',
+      };
+    }
+    return { status: error.status, message: error.message };
+  }
+  if (stage === 'volume' && errorStatus(error) === 403) {
+    return {
+      status: 403,
+      message: 'You do not have access to the upload location. Ask an admin to grant you access, then try again.',
+    };
+  }
+  if (stage === 'validation' || stage === 'verification') {
+    return { status: 422, message: 'The file could not be read safely. Check the file and try again.' };
+  }
+  return { status: 500, message: 'The upload service had a problem. Nothing was changed. Please try again.' };
+}
+
 export function setupIngestRoutes(appkit: IngestAppKit): void {
   appkit.server.extend((app) => {
     app.post('/api/ingest/:taskId/upload', rawBody({ type: '*/*', limit: MAX_UPLOAD_BYTES }), async (req, res) => {
+      let stage: UploadStage = 'governance';
       try {
         const actor = actorOf(req);
         if (!actor) return friendlyFailure(res, 401, 'We could not verify your identity. Please sign in again.');
         const configVersion = await activeConfigHash(req, req.params.taskId);
         const spec = await resolveTaskConfig(req, req.params.taskId, configVersion, 'allocation_upsert');
         if (spec.settings['ingest_enabled'] !== true)
-          return friendlyFailure(res, 409, 'File collection is not enabled here.');
+          return friendlyFailure(
+            res,
+            409,
+            'This automation is not set up for uploads yet. Ask an admin to publish an ingest-enabled configuration.'
+          );
 
+        stage = 'validation';
         const encodedName = req.header('x-upload-filename') ?? '';
         let filename = '';
         try {
@@ -214,6 +251,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const volumeRoot = process.env['DATABRICKS_VOLUME_FILES'];
         if (!volumeRoot) throw new Error('files volume is not configured');
 
+        stage = 'volume';
         const userFiles = appkit.files('files').asUser(req);
         if (!(await userFiles.exists(relativePath))) {
           try {
@@ -223,6 +261,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           }
         }
 
+        stage = 'record';
         const db = appkit.lakebase;
         await db.query(
           `INSERT INTO ${SCHEMA}.ingest_run
@@ -234,6 +273,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         );
         const inserted = await db.query(`SELECT sha256 FROM ${SCHEMA}.ingest_run WHERE parse_id=$1`, [parseId]);
         const storedDigest = inserted.rows[0]?.['sha256'];
+        stage = 'verification';
         const landedBytes = await downloadedBytes(await userFiles.download(relativePath), MAX_UPLOAD_BYTES);
         const landedDigest = sha256(landedBytes);
         if (storedDigest !== digest || landedDigest !== digest) throw new Error('landed upload failed SHA-256 verification');
@@ -251,6 +291,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           return res.status(202).json({ parse_id: parseId, run_id: 0, sha256: digest, extraction_kind: kind });
         }
 
+        stage = 'parser';
         const run = await appkit.jobs('default').runNow({
           args: [
             '--input',
@@ -272,12 +313,15 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         );
         res.status(202).json({ parse_id: parseId, run_id: run.data.run_id, sha256: digest });
       } catch (error) {
-        console.error('Ingest upload failed:', error);
-        if (error instanceof ConfigResolutionError) {
-          friendlyFailure(res, error.status, error.message);
-        } else {
-          friendlyFailure(res, 500, 'We could not safely upload and start parsing this file. Nothing was changed.');
-        }
+        console.error('Ingest upload failed', {
+          actor: actorOf(req) ?? 'unverified',
+          task_id: req.params.taskId,
+          stage,
+          status: errorStatus(error),
+          error,
+        });
+        const failure = uploadFailure(error, stage);
+        friendlyFailure(res, failure.status, failure.message);
       }
     });
 
