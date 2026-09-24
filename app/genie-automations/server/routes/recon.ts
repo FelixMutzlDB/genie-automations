@@ -10,6 +10,7 @@
 //   - Two automation TYPES are exposed (reconciliation + vendor bank-detail) to
 //     showcase the framework, both through the same guarded engine.
 import { Application, Request, Response } from 'express';
+import { activeConfigHash, resolveTaskConfig } from '../config/resolveTaskConfig';
 
 const SCHEMA = 'genie_spike';
 const MODEL = 'databricks-claude-sonnet-4-6';
@@ -109,6 +110,8 @@ async function getProposal(d: UserDb, proposalId: string): Promise<unknown> {
 
 async function stageAllocationCorrection(
   d: UserDb,
+  taskId: string,
+  configVersionHash: string,
   args: { remittance_id: string; allocation_id: string; new_amount: number }
 ): Promise<unknown> {
   // By-reference: pull the current allocation version + invoice from the ledger.
@@ -125,9 +128,9 @@ async function stageAllocationCorrection(
   if (existing) alloc['expected_version'] = existing['entity_version'];
   const diff = { remittance_id: args.remittance_id, allocations: [alloc] };
   const r = await d.query(`SELECT ${SCHEMA}.stage_change($1,$2,$3,$4::jsonb) AS proposal_id`, [
-    'receivables-eu',
+    taskId,
     'allocation_upsert',
-    'cfg-recv-v1',
+    configVersionHash,
     JSON.stringify(diff),
   ]);
   return { proposal_id: r.rows[0]?.['proposal_id'], staged: diff };
@@ -135,6 +138,8 @@ async function stageAllocationCorrection(
 
 async function stageVendorBankUpdate(
   d: UserDb,
+  taskId: string,
+  configVersionHash: string,
   args: { vendor_id: string; new_iban: string; new_bic: string; effective_date: string }
 ): Promise<unknown> {
   const cur = await d.query(
@@ -149,9 +154,9 @@ async function stageVendorBankUpdate(
   };
   if (cur.rows[0]) diff['expected_version'] = cur.rows[0]['entity_version'];
   const r = await d.query(`SELECT ${SCHEMA}.stage_change($1,$2,$3,$4::jsonb) AS proposal_id`, [
-    'vendor-bank-eu',
+    taskId,
     'vendor_bank_update',
-    'cfg-vend-v1',
+    configVersionHash,
     JSON.stringify(diff),
   ]);
   return { proposal_id: r.rows[0]?.['proposal_id'], staged: diff };
@@ -182,10 +187,24 @@ async function isTaskMember(d: UserDb, taskId: string, userId: string): Promise<
   return Boolean(result.rows[0]);
 }
 
-async function taskIdForProposal(d: UserDb, proposalId: string): Promise<string | undefined> {
-  const result = await d.query(`SELECT task_id FROM ${SCHEMA}.proposed_changes WHERE proposal_id = $1`, [proposalId]);
+async function configForProposal(
+  d: UserDb,
+  proposalId: string
+): Promise<
+  { taskId: string; configVersionHash: string; operation: 'allocation_upsert' | 'vendor_bank_update' } | undefined
+> {
+  const result = await d.query(
+    `SELECT task_id, config_version_hash, change_type FROM ${SCHEMA}.proposed_changes WHERE proposal_id = $1`,
+    [proposalId]
+  );
   const taskId = result.rows[0]?.['task_id'];
-  return typeof taskId === 'string' ? taskId : undefined;
+  const configVersionHash = result.rows[0]?.['config_version_hash'];
+  const operation = result.rows[0]?.['change_type'];
+  return typeof taskId === 'string' &&
+    typeof configVersionHash === 'string' &&
+    (operation === 'allocation_upsert' || operation === 'vendor_bank_update')
+    ? { taskId, configVersionHash, operation }
+    : undefined;
 }
 
 async function recordTaskActivity(
@@ -218,13 +237,8 @@ async function tryRecordTaskActivity(d: UserDb, input: Parameters<typeof recordT
 function proposalIdFromEvents(events: ToolEvent[], taskId?: string): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
-    const expectedTaskId =
-      event?.tool === 'stage_allocation_correction'
-        ? 'receivables-eu'
-        : event?.tool === 'stage_vendor_bank_update'
-          ? 'vendor-bank-eu'
-          : undefined;
-    if (!expectedTaskId || (taskId && expectedTaskId !== taskId)) continue;
+    if (!taskId || (event?.tool !== 'stage_allocation_correction' && event?.tool !== 'stage_vendor_bank_update'))
+      continue;
     const result = event.result;
     if (result && typeof result === 'object' && 'proposal_id' in result) {
       const proposalId = (result as { proposal_id?: unknown }).proposal_id;
@@ -337,7 +351,13 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
-async function runTool(d: UserDb, name: string, args: Record<string, unknown>, taskId?: string): Promise<unknown> {
+async function runTool(
+  req: Request,
+  d: UserDb,
+  name: string,
+  args: Record<string, unknown>,
+  taskId?: string
+): Promise<unknown> {
   switch (name) {
     case 'list_tasks':
       return listTasks();
@@ -348,20 +368,28 @@ async function runTool(d: UserDb, name: string, args: Record<string, unknown>, t
     case 'get_proposal':
       return getProposal(d, String(args['proposal_id']));
     case 'stage_allocation_correction':
-      if (taskId && taskId !== 'receivables-eu') return { error: 'tool does not belong to the selected task' };
-      return stageAllocationCorrection(d, {
-        remittance_id: String(args['remittance_id']),
-        allocation_id: String(args['allocation_id']),
-        new_amount: Number(args['new_amount']),
-      });
+      if (!taskId) return { error: 'select an automation before staging' };
+      {
+        const hash = await activeConfigHash(req, taskId);
+        await resolveTaskConfig(req, taskId, hash, 'allocation_upsert');
+        return stageAllocationCorrection(d, taskId, hash, {
+          remittance_id: String(args['remittance_id']),
+          allocation_id: String(args['allocation_id']),
+          new_amount: Number(args['new_amount']),
+        });
+      }
     case 'stage_vendor_bank_update':
-      if (taskId && taskId !== 'vendor-bank-eu') return { error: 'tool does not belong to the selected task' };
-      return stageVendorBankUpdate(d, {
-        vendor_id: String(args['vendor_id']),
-        new_iban: String(args['new_iban']),
-        new_bic: String(args['new_bic']),
-        effective_date: String(args['effective_date']),
-      });
+      if (!taskId) return { error: 'select an automation before staging' };
+      {
+        const hash = await activeConfigHash(req, taskId);
+        await resolveTaskConfig(req, taskId, hash, 'vendor_bank_update');
+        return stageVendorBankUpdate(d, taskId, hash, {
+          vendor_id: String(args['vendor_id']),
+          new_iban: String(args['new_iban']),
+          new_bic: String(args['new_bic']),
+          effective_date: String(args['effective_date']),
+        });
+      }
     default:
       return { error: `unknown tool ${name}` };
   }
@@ -431,7 +459,7 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
             }
             let result: unknown;
             try {
-              result = await runTool(d, tc.function.name, parsed, taskId);
+              result = await runTool(req, d, tc.function.name, parsed, taskId);
             } catch (e) {
               const pe = e as { code?: string; message?: string };
               result = { sqlstate: clientSafeSqlstate(pe.code), error: clientSafeError(e) };
@@ -477,15 +505,17 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
       const d = db(appkit, req);
       let taskId: string | undefined;
       try {
-        taskId = await taskIdForProposal(d, id);
-        if (!taskId) {
+        const proposalConfig = await configForProposal(d, id);
+        if (!proposalConfig) {
           res.status(404).json({ ok: false, error: 'proposal not found' });
           return;
         }
+        taskId = proposalConfig.taskId;
         if (!(await isTaskMember(d, taskId, actor))) {
           res.status(403).json({ ok: false, error: 'not a member of this task' });
           return;
         }
+        await resolveTaskConfig(req, taskId, proposalConfig.configVersionHash, proposalConfig.operation, false);
         const r = await d.query(`SELECT ${SCHEMA}.approve_change($1) AS result`, [id]);
         await tryRecordTaskActivity(d, {
           taskId,
@@ -518,15 +548,17 @@ export function setupReconRoutes(appkit: AppKitOBO): void {
       const d = db(appkit, req);
       let taskId: string | undefined;
       try {
-        taskId = await taskIdForProposal(d, id);
-        if (!taskId) {
+        const proposalConfig = await configForProposal(d, id);
+        if (!proposalConfig) {
           res.status(404).json({ ok: false, error: 'proposal not found' });
           return;
         }
+        taskId = proposalConfig.taskId;
         if (!(await isTaskMember(d, taskId, actor))) {
           res.status(403).json({ ok: false, error: 'not a member of this task' });
           return;
         }
+        await resolveTaskConfig(req, taskId, proposalConfig.configVersionHash, proposalConfig.operation, false);
         const r = await d.query(`SELECT ${SCHEMA}.commit_change($1,$2,'user') AS result`, [id, actor]);
         const result = r.rows[0]?.['result'];
         const audit = await d.query(

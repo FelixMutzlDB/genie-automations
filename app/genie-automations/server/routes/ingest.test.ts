@@ -2,6 +2,24 @@ import { Application, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { setupIngestRoutes } from './ingest';
 import { readFileSync } from 'node:fs';
+import { ConfigResolutionError } from '../config/resolveTaskConfig';
+
+const resolverMocks = vi.hoisted(() => ({
+  activeConfigHash: vi.fn(),
+  resolveTaskConfig: vi.fn(),
+}));
+vi.mock('../config/resolveTaskConfig', () => ({
+  ...resolverMocks,
+  ConfigResolutionError: class ConfigResolutionError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public status = 409
+    ) {
+      super(message);
+    }
+  },
+}));
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
@@ -30,6 +48,19 @@ function harness(
     artifact?: string;
   } = {}
 ) {
+  resolverMocks.activeConfigHash.mockReset();
+  resolverMocks.resolveTaskConfig.mockReset();
+  if (gate['is_member'] === false) {
+    resolverMocks.activeConfigHash.mockRejectedValue(
+      new ConfigResolutionError('not_authorized', 'Task configuration is unavailable.', 403)
+    );
+  } else {
+    resolverMocks.activeConfigHash.mockResolvedValue('receivables-v1');
+  }
+  resolverMocks.resolveTaskConfig.mockResolvedValue({
+    taskType: typeof gate['task_type'] === 'string' ? gate['task_type'] : 'reconciliation',
+    settings: { ingest_enabled: gate['ingest_enabled'] !== false },
+  });
   const handlers = new Map<string, Handler>();
   const userQuery = vi.fn().mockResolvedValue({ rows: [gate] });
   const appQuery = vi.fn().mockResolvedValue({ rows: options.appRows ?? [] });
@@ -201,6 +232,21 @@ function confirmHarness(
     artifact?: string;
   } = {}
 ) {
+  resolverMocks.resolveTaskConfig.mockReset();
+  if (task['is_member'] === false) {
+    resolverMocks.resolveTaskConfig.mockRejectedValue(
+      new ConfigResolutionError('not_authorized', 'Task configuration is unavailable.', 403)
+    );
+  } else if (!task['target_catalog'] || !task['target_schema'] || !task['target_table']) {
+    resolverMocks.resolveTaskConfig.mockRejectedValue(
+      new ConfigResolutionError('unbound', 'This automation is awaiting admin configuration.', 409)
+    );
+  } else {
+    resolverMocks.resolveTaskConfig.mockResolvedValue({
+      taskType: typeof task['task_type'] === 'string' ? task['task_type'] : 'reconciliation',
+      settings: { ingest_enabled: task['ingest_enabled'] !== false },
+    });
+  }
   const handlers = new Map<string, Handler>();
   const appQuery = vi.fn().mockResolvedValue({ rows: [] });
   const proposalsByDiff = new Map<unknown, string>();
