@@ -55,6 +55,7 @@ async function logFailure(appkit: ChaseAppKit, req: Request, action: string): Pr
   if (!actor) return;
   try {
     await appkit.lakebase.asUser(req).query(
+      // Chase activity intentionally shares the product-wide task_activity feed.
       `INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
        SELECT t.task_id,$2,$3,'failure',jsonb_build_object('reason','request_failed')
          FROM ${SCHEMA}.task t
@@ -119,18 +120,20 @@ function policyOf(row: Record<string, unknown>): ChasePolicy {
 }
 
 async function evaluate(db: UserDb, taskId: string, actor: string, now: Date): Promise<number> {
-  const configResult = await db.query(`SELECT * FROM ${SCHEMA}.task_schedule_config WHERE task_id=$1`, [taskId]);
+  const configResult = await db.query(`SELECT * FROM ${SCHEMA}.get_task_schedule_config($1)`, [taskId]);
   const config = configResult.rows[0];
   if (!config) throw new Error('schedule_missing');
   const policy = policyOf(config);
   const source = await db.query(
     `SELECT r.remittance_id AS item_reference, r.period AS accounting_period,
             r.total_amount-COALESCE(SUM(a.amount),0) AS remaining_amount
-       FROM ${SCHEMA}.remittance r
+      FROM ${SCHEMA}.remittance r
        LEFT JOIN ${SCHEMA}.allocation a ON a.remittance_id=r.remittance_id
+      WHERE r.task_id=$1
       GROUP BY r.remittance_id,r.period,r.total_amount
      HAVING r.total_amount-COALESCE(SUM(a.amount),0)>0
-      ORDER BY r.remittance_id`
+      ORDER BY r.remittance_id`,
+    [taskId]
   );
   const activeReferences: string[] = [];
   for (const row of source.rows) {
@@ -138,24 +141,22 @@ async function evaluate(db: UserDb, taskId: string, actor: string, now: Date): P
     const dueAt = dueAtFor(String(row['accounting_period']), policy);
     if (!dueAt) continue;
     activeReferences.push(itemReference);
-    const state = stateAt(now, dueAt, policy.approachOffsets);
+    const state = stateAt(now, dueAt, policy.approachOffsets, policy.timezone);
     const nextCheck = nextCheckAt(now, dueAt, policy);
-    await db.query(
-      `INSERT INTO ${SCHEMA}.chase_item_status(
-         task_id,item_reference,due_at,state,next_check_at,outstanding_amount,updated_at)
-       VALUES($1,$2,$3,$4,$5,$6,now())
-       ON CONFLICT(task_id,item_reference) DO UPDATE SET
-         due_at=EXCLUDED.due_at,state=EXCLUDED.state,next_check_at=EXCLUDED.next_check_at,
-         outstanding_amount=EXCLUDED.outstanding_amount,updated_at=now()`,
-      [taskId, itemReference, dueAt.toISOString(), state, nextCheck?.toISOString() ?? null, row['remaining_amount']]
-    );
+    await db.query(`SELECT ${SCHEMA}.save_chase_item_status($1,$2,$3,$4,$5,$6)`, [
+      taskId,
+      itemReference,
+      dueAt.toISOString(),
+      state,
+      nextCheck?.toISOString() ?? null,
+      row['remaining_amount'],
+    ]);
   }
-  await db.query(
-    `UPDATE ${SCHEMA}.chase_item_status
-        SET state='resolved',outstanding_amount=0,next_check_at=NULL,updated_at=now()
-      WHERE task_id=$1 AND state<>'resolved' AND NOT(item_reference=ANY($2::text[]))`,
-    [taskId, activeReferences]
-  );
+  await db.query(`SELECT ${SCHEMA}.resolve_missing_chase_items($1,$2::text[]) AS resolved_count`, [
+    taskId,
+    activeReferences,
+  ]);
+  // Chase activity intentionally shares the product-wide task_activity feed.
   await db.query(
     `INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
      VALUES($1,$2,'chase_evaluated','success',jsonb_build_object('item_count',$3::int))`,
@@ -174,7 +175,7 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
         const result = await db.query(
           `SELECT task_id,enabled,cadence,due_offset_days,default_due_at,approach_offsets,
                   post_due_offsets,quiet_hours_start,quiet_hours_end,timezone,updated_by,updated_at
-             FROM ${SCHEMA}.task_schedule_config WHERE task_id=$1`,
+             FROM ${SCHEMA}.get_task_schedule_config($1)`,
           [req.params.id]
         );
         res.json({ config: result.rows[0] ?? null, can_edit: canManage(access.actor, access.role) });
@@ -204,22 +205,8 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
         }
         const value = parsed.data;
         const result = await db.query(
-          `WITH saved AS (
-             INSERT INTO ${SCHEMA}.task_schedule_config(
-               task_id,enabled,cadence,due_offset_days,default_due_at,approach_offsets,post_due_offsets,
-               quiet_hours_start,quiet_hours_end,timezone,updated_by,updated_at)
-             VALUES($1,$2,$3,$4,$5,$6::int[],$7::int[],$8::time,$9::time,$10,$11,now())
-             ON CONFLICT(task_id) DO UPDATE SET enabled=EXCLUDED.enabled,cadence=EXCLUDED.cadence,
-               due_offset_days=EXCLUDED.due_offset_days,default_due_at=EXCLUDED.default_due_at,
-               approach_offsets=EXCLUDED.approach_offsets,post_due_offsets=EXCLUDED.post_due_offsets,
-               quiet_hours_start=EXCLUDED.quiet_hours_start,quiet_hours_end=EXCLUDED.quiet_hours_end,
-               timezone=EXCLUDED.timezone,updated_by=EXCLUDED.updated_by,updated_at=now()
-             RETURNING *
-           ), activity AS (
-             INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-             SELECT task_id,$11,'chase_schedule_saved','success',jsonb_build_object('enabled',enabled,'cadence',cadence)
-             FROM saved
-           ) SELECT * FROM saved`,
+          `SELECT * FROM ${SCHEMA}.save_task_schedule_config(
+             $1,$2,$3,$4,$5,$6::int[],$7::int[],$8::time,$9::time,$10)`,
           [
             req.params.id,
             value.enabled,
@@ -231,7 +218,6 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
             value.quiet_hours_start,
             value.quiet_hours_end,
             value.timezone,
-            access.actor,
           ]
         );
         res.json(result.rows[0]);
@@ -269,12 +255,8 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
         const access = await requireMember(db, req, res);
         if (!access) return;
         const result = await db.query(
-          `SELECT cis.item_reference,cis.due_at,cis.state,cis.outstanding_amount,cis.next_check_at,
-                  tsc.enabled,tsc.timezone
-             FROM ${SCHEMA}.chase_item_status cis
-             JOIN ${SCHEMA}.task_schedule_config tsc ON tsc.task_id=cis.task_id
-            WHERE cis.task_id=$1 AND tsc.enabled AND cis.state IN ('approaching_due','overdue')
-            ORDER BY (cis.state='overdue') DESC,cis.due_at,cis.item_reference`,
+          `SELECT item_reference,due_at,state,outstanding_amount,next_check_at,enabled,timezone
+             FROM ${SCHEMA}.get_chase_preview($1)`,
           [req.params.id]
         );
         const approaching = result.rows.filter((row) => row['state'] === 'approaching_due').length;

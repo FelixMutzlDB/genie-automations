@@ -22,12 +22,34 @@ describe('chase due-date and state computation', () => {
     expect(dueAtFor('not-a-period', policy)).toBeNull();
   });
 
+  it('accepts a YYYY-MM-DD accounting period as the due-date base', () => {
+    expect(dueAtFor('2026-03-28', policy)?.toISOString()).toBe('2026-03-29T22:00:00.000Z');
+  });
+
   it('holds exact scheduled, approaching, and overdue boundaries', () => {
     const due = new Date('2026-10-10T00:00:00.000Z');
-    expect(stateAt(new Date('2026-10-02T23:59:59.999Z'), due, policy.approachOffsets)).toBe('scheduled');
-    expect(stateAt(new Date('2026-10-03T00:00:00.000Z'), due, policy.approachOffsets)).toBe('approaching_due');
-    expect(stateAt(new Date('2026-10-09T23:59:59.999Z'), due, policy.approachOffsets)).toBe('approaching_due');
-    expect(stateAt(due, due, policy.approachOffsets)).toBe('overdue');
+    expect(stateAt(new Date('2026-10-02T23:59:59.999Z'), due, policy.approachOffsets, policy.timezone)).toBe(
+      'scheduled'
+    );
+    expect(stateAt(new Date('2026-10-03T00:00:00.000Z'), due, policy.approachOffsets, policy.timezone)).toBe(
+      'approaching_due'
+    );
+    expect(stateAt(new Date('2026-10-09T23:59:59.999Z'), due, policy.approachOffsets, policy.timezone)).toBe(
+      'approaching_due'
+    );
+    expect(stateAt(due, due, policy.approachOffsets, policy.timezone)).toBe('overdue');
+  });
+
+  it('keeps approach boundaries at local midnight across the spring DST transition', () => {
+    const due = new Date('2026-03-31T22:00:00.000Z'); // 1 April, 00:00 Europe/Berlin
+    const dstPolicy = { ...policy, cadence: 'weekly' as const, approachOffsets: [3] };
+    const boundary = new Date('2026-03-28T23:00:00.000Z'); // 29 March, 00:00 Europe/Berlin
+
+    expect(stateAt(new Date(boundary.getTime() - 1), due, [3], policy.timezone)).toBe('scheduled');
+    expect(stateAt(boundary, due, [3], policy.timezone)).toBe('approaching_due');
+    expect(nextCheckAt(new Date('2026-03-28T22:00:00.000Z'), due, dstPolicy)?.toISOString()).toBe(
+      boundary.toISOString()
+    );
   });
 
   it('chooses the next approach, due, or post-due checkpoint', () => {
