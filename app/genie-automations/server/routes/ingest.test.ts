@@ -50,6 +50,7 @@ function harness(
     exists?: boolean;
     uploadError?: unknown;
     appRows?: Record<string, unknown>[];
+    userRows?: Record<string, unknown>[];
     run?: Record<string, unknown>;
     artifact?: string;
     landedBytes?: Buffer;
@@ -70,7 +71,7 @@ function harness(
     settings: { ingest_enabled: gate['ingest_enabled'] !== false },
   });
   const handlers = new Map<string, Handler>();
-  const userQuery = vi.fn().mockResolvedValue({ rows: [gate] });
+  const userQuery = vi.fn().mockResolvedValue({ rows: options.userRows ?? [gate] });
   let insertedSha: unknown;
   const appQuery = vi.fn((sql: string, params?: unknown[]) => {
     if (sql.includes('INSERT INTO genie_spike.ingest_run')) insertedSha = params?.[4];
@@ -109,7 +110,7 @@ function harness(
     server: { extend: (register) => register(app) },
   };
   setupIngestRoutes(appkit);
-  return { handlers, appQuery, exists, upload, read, download, runNow, getRun, getRunOutput };
+  return { handlers, appQuery, userQuery, exists, upload, read, download, runNow, getRun, getRunOutput };
 }
 
 function request(email: string | null = 'alice@example.com'): Request {
@@ -265,10 +266,11 @@ describe('ingest upload route', () => {
 
 describe('ingest poll and preview routes', () => {
   it('normalizes terminated failed Jobs and does not request their output', async () => {
-    const { handlers, getRunOutput } = harness(
+    const { handlers, appQuery, userQuery, getRunOutput } = harness(
       {},
       {
-        appRows: [{ run_id: 77, status: 'running' }],
+        appRows: [{ task_id: 'receivables-eu', run_id: 77, status: 'running' }],
+        userRows: [{ '?column?': 1 }],
         run: { state: { life_cycle_state: 'TERMINATED', result_state: 'FAILED' } },
       }
     );
@@ -277,14 +279,27 @@ describe('ingest poll and preview routes', () => {
     const { res, state } = response();
     await handlers.get('GET /api/ingest/:parseId/poll')?.(req, res);
     expect(state.body).toMatchObject({ status: 'failed' });
+    expect(userQuery).toHaveBeenCalledWith(expect.stringContaining('FROM genie_spike.task_member'), [
+      'receivables-eu',
+      'alice@example.com',
+    ]);
+    expect(appQuery).toHaveBeenCalledWith(expect.stringContaining('FROM genie_spike.ingest_run'), [
+      '98e06e87-9d56-4e92-a530-4bd4ad5b1264',
+    ]);
+    expect(appQuery).not.toHaveBeenCalledWith(expect.stringContaining('genie_spike.task_member'), expect.anything());
+    expect(appQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE genie_spike.ingest_run'), [
+      '98e06e87-9d56-4e92-a530-4bd4ad5b1264',
+      'failed',
+    ]);
     expect(getRunOutput).not.toHaveBeenCalled();
   });
 
   it('reads an authorized preview through the caller-scoped Volume handle', async () => {
-    const { handlers, read } = harness(
+    const { handlers, appQuery, userQuery, read } = harness(
       {},
       {
-        appRows: [{ artifact_ref: 'task/digest/parse.preview.json' }],
+        appRows: [{ task_id: 'receivables-eu', artifact_ref: 'task/digest/parse.preview.json' }],
+        userRows: [{ '?column?': 1 }],
         artifact: '{"status":"ready","rows":[]}',
       }
     );
@@ -292,8 +307,53 @@ describe('ingest poll and preview routes', () => {
     req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
     const { res, state } = response();
     await handlers.get('GET /api/ingest/:parseId/preview')?.(req, res);
+    expect(userQuery).toHaveBeenCalledWith(expect.stringContaining('FROM genie_spike.task_member'), [
+      'receivables-eu',
+      'alice@example.com',
+    ]);
+    expect(appQuery).toHaveBeenCalledWith(expect.stringContaining('FROM genie_spike.ingest_run'), [
+      '98e06e87-9d56-4e92-a530-4bd4ad5b1264',
+    ]);
+    expect(appQuery).not.toHaveBeenCalledWith(expect.stringContaining('genie_spike.task_member'), expect.anything());
     expect(read).toHaveBeenCalledWith('task/digest/parse.preview.json', { maxSize: 10 * 1024 * 1024 });
     expect(state.body).toMatchObject({ status: 'ready' });
+  });
+
+  it('denies preview content when the OBO caller is not a task member', async () => {
+    const { handlers, read } = harness(
+      {},
+      {
+        appRows: [{ task_id: 'receivables-eu', artifact_ref: 'task/digest/parse.preview.json' }],
+        userRows: [],
+      }
+    );
+    const req = request();
+    req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
+    const { res, state } = response();
+    await handlers.get('GET /api/ingest/:parseId/preview')?.(req, res);
+    expect(state.status).toBe(403);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['image', 'vision-v1'],
+    ['CSV', 'spike-02-v2'],
+  ])('denies %s polling before retrieving or updating run status when the OBO caller is not a task member', async (_kind, parserVersion) => {
+    const { handlers, appQuery, getRun, getRunOutput } = harness(
+      {},
+      {
+        appRows: [{ task_id: 'receivables-eu', run_id: 77, status: 'running', parser_version: parserVersion }],
+        userRows: [],
+      }
+    );
+    const req = request();
+    req.params = { parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264' };
+    const { res, state } = response();
+    await handlers.get('GET /api/ingest/:parseId/poll')?.(req, res);
+    expect(state.status).toBe(403);
+    expect(getRun).not.toHaveBeenCalled();
+    expect(getRunOutput).not.toHaveBeenCalled();
+    expect(appQuery.mock.calls.some(([sql]) => String(sql).includes('UPDATE genie_spike.ingest_run'))).toBe(false);
   });
 });
 
