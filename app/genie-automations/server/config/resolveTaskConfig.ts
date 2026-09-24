@@ -1,5 +1,4 @@
 import { Request } from 'express';
-import { bindingDigest } from './canonical';
 
 const SCHEMA = 'genie_spike';
 
@@ -67,6 +66,8 @@ export async function resolveTaskConfig(
   const result = await configuredAppKit.lakebase.asUser(req).query(
     `SELECT t.task_id, t.task_type, cv.version_hash, cv.payload, cv.status AS config_status,
             encode(digest(convert_to(cv.payload::text, 'UTF8'), 'sha256'), 'hex') AS computed_hash,
+            ${SCHEMA}.binding_digest(db.task_id,db.dest_catalog,db.dest_schema,db.dest_table,
+              db.write_scope,db.identity_ref) AS computed_binding_digest,
             tcs.active_version_hash, db.binding_id, db.dest_catalog, db.dest_schema,
             db.dest_table, db.write_scope, db.identity_ref, db.status AS binding_status
        FROM ${SCHEMA}.task t
@@ -95,8 +96,15 @@ export async function resolveTaskConfig(
     throw new ConfigResolutionError('invalid_scope', 'Write scope is invalid.');
   const taskType = typeof row['task_type'] === 'string' ? row['task_type'] : '';
   const changeTypes = (writeScope as Record<string, unknown>)['change_types'];
+  const expectedOperation =
+    taskType === 'vendor_bank' || taskType === 'vendor_bank_update'
+      ? 'vendor_bank_update'
+      : taskType === 'receivables' || taskType === 'allocation_upsert' || taskType === 'reconciliation'
+        ? 'allocation_upsert'
+        : undefined;
   if (
-    (taskType !== 'receivables' && taskType !== 'allocation_upsert' && taskType !== 'reconciliation') ||
+    !expectedOperation ||
+    operation !== expectedOperation ||
     !Array.isArray(changeTypes) ||
     !changeTypes.includes(operation)
   ) {
@@ -110,15 +118,7 @@ export async function resolveTaskConfig(
     throw new ConfigResolutionError('destination_not_allowed', 'Destination is not deployment-approved.', 403);
   if (row['identity_ref'] !== 'obo_user')
     throw new ConfigResolutionError('identity_not_allowed', 'Interactive operations require OBO identity.', 403);
-  const digest = bindingDigest({
-    task_id: taskId,
-    dest_catalog: destCatalog,
-    dest_schema: destSchema,
-    dest_table: destTable,
-    write_scope: writeScope,
-    identity_ref: typeof row['identity_ref'] === 'string' ? row['identity_ref'] : '',
-  });
-  if ((payload as Record<string, unknown>)['binding_digest'] !== digest)
+  if ((payload as Record<string, unknown>)['binding_digest'] !== row['computed_binding_digest'])
     throw new ConfigResolutionError('binding_mismatch', 'Configuration is not bound to the active destination.');
   const settings = (payload as Record<string, unknown>)['settings'];
   return {

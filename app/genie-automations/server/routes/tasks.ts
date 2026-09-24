@@ -53,8 +53,8 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
           `SELECT t.task_id, t.name, t.task_type, t.org_id,
                   tm.role,
                   CASE
-                    WHEN db.status = 'active' AND cv.status = 'published' THEN 'active'
-                    WHEN db.status = 'pending' THEN 'awaiting_approval'
+                    WHEN governance.has_active AND cv.status = 'published' THEN 'active'
+                    WHEN governance.has_pending THEN 'awaiting_approval'
                     ELSE 'unbound'
                   END AS governance_status,
                   COUNT(all_members.user_id)::int AS member_count
@@ -62,11 +62,16 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
              LEFT JOIN ${SCHEMA}.task_member tm
                ON tm.task_id = t.task_id AND tm.user_id = $1
              LEFT JOIN ${SCHEMA}.task_member all_members ON all_members.task_id = t.task_id
-             LEFT JOIN ${SCHEMA}.destination_binding db ON db.task_id=t.task_id AND db.status IN ('pending','active')
+             LEFT JOIN LATERAL (
+               SELECT bool_or(db.status='active') AS has_active,
+                      bool_or(db.status='pending') AS has_pending
+                 FROM ${SCHEMA}.destination_binding db WHERE db.task_id=t.task_id
+             ) governance ON true
              LEFT JOIN ${SCHEMA}.task_config_state tcs ON tcs.task_id=t.task_id
              LEFT JOIN ${SCHEMA}.config_version cv ON cv.task_id=tcs.task_id AND cv.version_hash=tcs.active_version_hash
             WHERE t.status = 'active' AND t.org_id = 'org-demo'
-            GROUP BY t.task_id, t.name, t.task_type, t.org_id, tm.role, db.status, cv.status
+            GROUP BY t.task_id, t.name, t.task_type, t.org_id, tm.role,
+                     governance.has_active, governance.has_pending, cv.status
             ORDER BY t.created_at DESC`,
           [userId]
         );

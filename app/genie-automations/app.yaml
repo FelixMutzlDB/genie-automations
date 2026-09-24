@@ -6,7 +6,3 @@ env:
     valueFrom: files
   - name: DATABRICKS_JOB_ID
     valueFrom: job
-  - name: CONFIG_ADMIN_PRINCIPALS
-    value: felix.mutzl@databricks.com
-  - name: CONFIG_DESTINATION_ALLOWLIST
-    value: felix_demo_catalog.genie_spike.allocation

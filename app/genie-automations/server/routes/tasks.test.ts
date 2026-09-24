@@ -114,6 +114,8 @@ describe('task routes', () => {
     await handlers.get('GET /api/tasks')?.(request(), res);
 
     expect(query).toHaveBeenCalledWith(expect.stringContaining("t.org_id = 'org-demo'"), ['alice@example.com']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('LEFT JOIN LATERAL'), ['alice@example.com']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("bool_or(db.status='active')"), ['alice@example.com']);
     expect(state.body).toEqual([task]);
   });
 

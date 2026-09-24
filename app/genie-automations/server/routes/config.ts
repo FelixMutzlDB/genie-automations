@@ -1,6 +1,5 @@
 import { Application, Request, Response } from 'express';
 import { z } from 'zod';
-import { bindingDigest, configHash } from '../config/canonical';
 
 const SCHEMA = 'genie_spike';
 interface QueryResult {
@@ -61,21 +60,6 @@ function requireAdmin(req: Request, res: Response): string | undefined {
   }
   return actor;
 }
-function payload(settings: z.infer<typeof settingsSchema>, digest: string): Record<string, unknown> {
-  return {
-    binding_digest: digest,
-    platform_minimums: {
-      money_column_presence: true,
-      money_parse_validity: true,
-      cross_foot_totals: true,
-      non_negative_allocations: true,
-      over_allocation_ceiling: 1,
-      structural_confidence_floor: 0.8,
-    },
-    settings,
-  };
-}
-
 export function setupConfigRoutes(appkit: ConfigAppKit): void {
   appkit.server.extend((app) => {
     app.get('/api/tasks/:id/config', async (req, res) => {
@@ -106,49 +90,31 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
         return;
       }
       const actor = actorOf(req);
-      const db = appkit.lakebase.asUser(req);
-      const binding = await db.query(
-        `SELECT db.task_id, db.dest_catalog, db.dest_schema, db.dest_table, db.write_scope, db.identity_ref
-           FROM ${SCHEMA}.destination_binding db JOIN ${SCHEMA}.task_member tm ON tm.task_id=db.task_id
-          WHERE db.task_id=$1 AND lower(tm.user_id)=lower($2) AND tm.role='owner'
-            AND db.status IN ('pending','active') ORDER BY db.proposed_at DESC LIMIT 1`,
-        [req.params.id, actor]
-      );
-      const row = binding.rows[0];
-      if (!row) {
-        res.status(409).json({ error: 'An admin binding is required before settings can be submitted.' });
+      if (!actor) {
+        res.status(401).json({ error: 'Authenticated identity is required.' });
         return;
       }
-      const digest = bindingDigest({
-        task_id: String(row['task_id']),
-        dest_catalog: String(row['dest_catalog']),
-        dest_schema: String(row['dest_schema']),
-        dest_table: String(row['dest_table']),
-        write_scope: row['write_scope'],
-        identity_ref: String(row['identity_ref']),
-      });
-      const body = payload(parsed.data, digest);
+      const db = appkit.lakebase.asUser(req);
       const result = await db.query(
-        `INSERT INTO ${SCHEMA}.config_version(task_id,version_hash,payload,status,created_by)
-         VALUES ($1,$2,$3::jsonb,'draft',$4)
-         ON CONFLICT (task_id,version_hash) DO UPDATE SET payload=EXCLUDED.payload
-           WHERE ${SCHEMA}.config_version.status='draft' AND ${SCHEMA}.config_version.created_by=$4
-         RETURNING task_id,version_hash,status`,
-        [req.params.id, configHash(body), JSON.stringify(body), actor]
+        `SELECT task_id,version_hash,status FROM ${SCHEMA}.save_config_draft($1,$2::jsonb)`,
+        [req.params.id, JSON.stringify(parsed.data)]
       );
+      if (!result.rows[0]) {
+        res.status(409).json({ error: 'An identical owner draft already exists.' });
+        return;
+      }
       res.json(result.rows[0]);
     });
 
     app.post('/api/tasks/:id/config/submit', async (req, res) => {
       const actor = actorOf(req);
-      const result = await appkit.lakebase.asUser(req).query(
-        `WITH owned AS (SELECT 1 FROM ${SCHEMA}.task_member WHERE task_id=$1 AND lower(user_id)=lower($2) AND role='owner'),
-         draft AS (SELECT version_hash FROM ${SCHEMA}.config_version WHERE task_id=$1 AND created_by=$2 AND status='draft' ORDER BY created_at DESC LIMIT 1),
-         activity AS (INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-           SELECT $1,$2,'config_submitted','success',jsonb_build_object('version_hash',draft.version_hash) FROM draft,owned RETURNING 1)
-         SELECT version_hash FROM draft WHERE EXISTS (SELECT 1 FROM activity)`,
-        [req.params.id, actor]
-      );
+      if (!actor) {
+        res.status(401).json({ error: 'Authenticated identity is required.' });
+        return;
+      }
+      const result = await appkit.lakebase
+        .asUser(req)
+        .query(`SELECT * FROM ${SCHEMA}.submit_config_draft($1)`, [req.params.id]);
       if (!result.rows[0]) {
         res.status(404).json({ error: 'No owner draft is available.' });
         return;
@@ -182,17 +148,16 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
         res.status(403).json({ error: 'Destination is not deployment-approved.' });
         return;
       }
-      const result = await appkit.lakebase.asUser(req).query(
-        `WITH task_ok AS (SELECT task_id FROM ${SCHEMA}.task WHERE task_id=$1 AND task_type IN ('receivables','allocation_upsert','reconciliation')),
-         inserted AS (INSERT INTO ${SCHEMA}.destination_binding(task_id,dest_catalog,dest_schema,dest_table,write_scope,identity_ref,status,proposed_by)
-           SELECT task_id,$2,$3,$4,'{"change_types":["allocation_upsert"]}'::jsonb,'obo_user','pending',$5 FROM task_ok RETURNING *),
-         activity AS (INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-           SELECT task_id,$5,'binding_proposed','success',jsonb_build_object('binding_id',binding_id) FROM inserted)
-         SELECT * FROM inserted`,
-        [req.params.id, parsed.data.dest_catalog, parsed.data.dest_schema, parsed.data.dest_table, actor]
-      );
+      const result = await appkit.lakebase
+        .asUser(req)
+        .query(`SELECT * FROM ${SCHEMA}.propose_destination_binding($1,$2,$3,$4)`, [
+          req.params.id,
+          parsed.data.dest_catalog,
+          parsed.data.dest_schema,
+          parsed.data.dest_table,
+        ]);
       if (!result.rows[0]) {
-        res.status(409).json({ error: 'Only receivables tasks can be bound in this release.' });
+        res.status(409).json({ error: 'This task cannot be bound.' });
         return;
       }
       res.status(201).json(result.rows[0]);
@@ -201,14 +166,12 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
     app.post('/api/admin/tasks/:id/bindings/:bindingId/approve', async (req, res) => {
       const actor = requireAdmin(req, res);
       if (!actor) return;
-      const result = await appkit.lakebase.asUser(req).query(
-        `WITH approved AS (UPDATE ${SCHEMA}.destination_binding SET status='active',approved_by=$3,approved_at=now()
-           WHERE task_id=$1 AND binding_id=$2 AND status='pending' AND lower(proposed_by)<>lower($3) RETURNING *),
-         activity AS (INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-           SELECT task_id,$3,'binding_approved','success',jsonb_build_object('binding_id',binding_id) FROM approved)
-         SELECT * FROM approved`,
-        [req.params.id, req.params.bindingId, actor]
-      );
+      const result = await appkit.lakebase
+        .asUser(req)
+        .query(`SELECT * FROM ${SCHEMA}.approve_destination_binding($1,$2::uuid)`, [
+          req.params.id,
+          req.params.bindingId,
+        ]);
       if (!result.rows[0]) {
         res.status(409).json({ error: 'A different admin must approve this binding.' });
         return;
@@ -219,41 +182,12 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
     app.post('/api/admin/tasks/:id/config/:hash/publish', async (req, res) => {
       const actor = requireAdmin(req, res);
       if (!actor) return;
-      const db = appkit.lakebase.asUser(req);
-      const candidate = await db.query(
-        `SELECT cv.payload,db.task_id,db.dest_catalog,db.dest_schema,db.dest_table,db.write_scope,db.identity_ref
-           FROM ${SCHEMA}.config_version cv JOIN ${SCHEMA}.destination_binding db ON db.task_id=cv.task_id AND db.status='active'
-          WHERE cv.task_id=$1 AND cv.version_hash=$2 AND cv.status='draft'`,
-        [req.params.id, req.params.hash]
-      );
-      const bound = candidate.rows[0];
-      if (!bound || !bound['payload'] || typeof bound['payload'] !== 'object' || Array.isArray(bound['payload'])) {
-        res.status(409).json({ error: 'A draft with an active binding is required.' });
-        return;
-      }
-      const expectedDigest = bindingDigest({
-        task_id: String(bound['task_id']),
-        dest_catalog: String(bound['dest_catalog']),
-        dest_schema: String(bound['dest_schema']),
-        dest_table: String(bound['dest_table']),
-        write_scope: bound['write_scope'],
-        identity_ref: String(bound['identity_ref']),
-      });
-      if ((bound['payload'] as Record<string, unknown>)['binding_digest'] !== expectedDigest) {
-        res.status(409).json({ error: 'The draft does not match the active destination binding.' });
-        return;
-      }
-      const result = await db.query(
-        `WITH published AS (UPDATE ${SCHEMA}.config_version cv SET status='published',approved_by=$3,published_at=now()
-           WHERE cv.task_id=$1 AND cv.version_hash=$2 AND cv.status='draft' AND lower(cv.created_by)<>lower($3)
-             AND EXISTS (SELECT 1 FROM ${SCHEMA}.destination_binding db WHERE db.task_id=cv.task_id AND db.status='active') RETURNING *),
-         state AS (INSERT INTO ${SCHEMA}.task_config_state(task_id,active_version_hash,updated_at)
-           SELECT task_id,version_hash,now() FROM published ON CONFLICT(task_id) DO UPDATE SET active_version_hash=EXCLUDED.active_version_hash,updated_at=now()),
-         activity AS (INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-           SELECT task_id,$3,'config_published','success',jsonb_build_object('version_hash',version_hash) FROM published)
-         SELECT task_id,version_hash,status FROM published WHERE EXISTS (SELECT 1 FROM state)`,
-        [req.params.id, req.params.hash, actor]
-      );
+      const result = await appkit.lakebase
+        .asUser(req)
+        .query(`SELECT task_id,version_hash,status FROM ${SCHEMA}.publish_config_version($1,$2::char(64))`, [
+          req.params.id,
+          req.params.hash,
+        ]);
       if (!result.rows[0]) {
         res.status(409).json({ error: 'A different admin/owner must publish a draft with an active binding.' });
         return;
@@ -264,16 +198,12 @@ export function setupConfigRoutes(appkit: ConfigAppKit): void {
     app.post('/api/admin/tasks/:id/config/:hash/retire', async (req, res) => {
       const actor = requireAdmin(req, res);
       if (!actor) return;
-      const result = await appkit.lakebase.asUser(req).query(
-        `WITH retired AS (UPDATE ${SCHEMA}.config_version SET status='retired',retired_at=now()
-           WHERE task_id=$1 AND version_hash=$2 AND status='published' RETURNING *),
-         state AS (UPDATE ${SCHEMA}.task_config_state SET active_version_hash=NULL,updated_at=now()
-           WHERE task_id=$1 AND active_version_hash=$2),
-         activity AS (INSERT INTO ${SCHEMA}.task_activity(task_id,user_id,action,status,detail)
-           SELECT task_id,$3,'config_retired','success',jsonb_build_object('version_hash',version_hash) FROM retired)
-         SELECT task_id,version_hash,status FROM retired`,
-        [req.params.id, req.params.hash, actor]
-      );
+      const result = await appkit.lakebase
+        .asUser(req)
+        .query(`SELECT task_id,version_hash,status FROM ${SCHEMA}.retire_config_version($1,$2::char(64))`, [
+          req.params.id,
+          req.params.hash,
+        ]);
       if (!result.rows[0]) {
         res.status(404).json({ error: 'Published configuration not found.' });
         return;

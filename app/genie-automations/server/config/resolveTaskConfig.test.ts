@@ -25,6 +25,7 @@ function row(overrides: Record<string, unknown> = {}) {
     version_hash: hash,
     payload,
     computed_hash: hash,
+    computed_binding_digest: payload.binding_digest,
     config_status: 'published',
     active_version_hash: hash,
     binding_status: 'active',
@@ -54,6 +55,24 @@ describe('resolveTaskConfig', () => {
     const spec = await resolveTaskConfig(req(), binding.task_id, hash, 'allocation_upsert');
     expect(spec.destination.fullyQualifiedName).toBe('catalog.finance.allocation');
     expect(spec).not.toHaveProperty('credentials');
+  });
+
+  it('resolves the seeded vendor modification scope without enabling vendor ingest', async () => {
+    process.env['CONFIG_DESTINATION_ALLOWLIST'] = 'catalog.finance.vendor_bank_detail';
+    configure([
+      row({
+        task_id: 'vendor-bank-eu',
+        task_type: 'vendor_bank',
+        dest_table: 'vendor_bank_detail',
+        write_scope: { change_types: ['vendor_bank_update'] },
+        payload: { ...payload, settings: { ingest_enabled: false } },
+      }),
+    ]);
+    await expect(resolveTaskConfig(req(), 'vendor-bank-eu', hash, 'vendor_bank_update')).resolves.toMatchObject({
+      taskType: 'vendor_bank',
+      settings: { ingest_enabled: false },
+      destination: { table: 'vendor_bank_detail' },
+    });
   });
 
   it.each([

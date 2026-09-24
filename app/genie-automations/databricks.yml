@@ -13,10 +13,8 @@ variables:
     default: felix_demo_catalog.genie-automations.raw_uploads
   config_admin_principals:
     description: Comma-separated trusted user/group principals allowed to govern config.
-    default: felix.mutzl@databricks.com
   config_destination_allowlist:
-    description: Comma-separated fully-qualified receivables destinations.
-    default: felix_demo_catalog.genie_spike.allocation
+    description: Comma-separated fully-qualified deployment-approved destinations.
 
 resources:
   apps:
