@@ -182,12 +182,37 @@ function friendlyFailure(res: Response, status: number, message: string): void {
   res.status(status).json({ error: message });
 }
 
-type UploadStage = 'governance' | 'validation' | 'volume' | 'record' | 'verification' | 'parser';
+type UploadStage =
+  | 'governance'
+  | 'validation'
+  | 'setup'
+  | 'volume_access'
+  | 'volume_write'
+  | 'record'
+  | 'verification'
+  | 'parser';
 
 function errorStatus(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
   const value = (error as Record<string, unknown>)['statusCode'] ?? (error as Record<string, unknown>)['status'];
   return typeof value === 'number' ? value : undefined;
+}
+
+function errorCode(error: unknown): string | number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const value = (error as Record<string, unknown>)['code'] ?? (error as Record<string, unknown>)['errorCode'];
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+function safeErrorFields(error: unknown): { error_name: string; error_code?: string | number; status?: number } {
+  const error_name = error instanceof Error ? error.name : 'UnknownError';
+  const error_code = errorCode(error);
+  const status = errorStatus(error);
+  return {
+    error_name,
+    ...(error_code !== undefined ? { error_code } : {}),
+    ...(status !== undefined ? { status } : {}),
+  };
 }
 
 export function uploadFailure(error: unknown, stage: UploadStage): { status: number; message: string } {
@@ -199,16 +224,38 @@ export function uploadFailure(error: unknown, stage: UploadStage): { status: num
           'This automation is not set up for uploads yet. Ask an admin to approve its destination and publish an ingest-enabled configuration.',
       };
     }
-    return { status: error.status, message: error.message };
+    return {
+      status: error.status,
+      message: 'We could not verify this automation\'s upload configuration. Ask an admin to review it, then try again.',
+    };
   }
-  if (stage === 'volume' && errorStatus(error) === 403) {
+  if ((stage === 'volume_access' || stage === 'volume_write') && errorStatus(error) === 403) {
     return {
       status: 403,
       message: 'You do not have access to the upload location. Ask an admin to grant you access, then try again.',
     };
   }
   if (stage === 'validation' || stage === 'verification') {
-    return { status: 422, message: 'The file could not be read safely. Check the file and try again.' };
+    return stage === 'verification'
+      ? {
+          status: 422,
+          message:
+            'The file was received, but it could not be read safely. No financial records were staged or changed. Check the file and try again.',
+        }
+      : { status: 422, message: 'The file could not be read safely. Check the file and try again.' };
+  }
+  if (stage === 'volume_write') {
+    return {
+      status: 500,
+      message: 'The upload did not finish. No financial records were staged or changed. It is safe to retry.',
+    };
+  }
+  if (stage === 'record' || stage === 'parser') {
+    return {
+      status: 500,
+      message:
+        'The file was received, but parsing and preview did not finish. No financial records were staged or changed. It is safe to retry.',
+    };
   }
   return { status: 500, message: 'The upload service had a problem. Nothing was changed. Please try again.' };
 }
@@ -248,13 +295,15 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const relativePath = uploadPath(req.params.taskId, digest, extension);
         const parseId = newParseId();
         const artifactPath = `${req.params.taskId}/${digest}/${parseId}.preview.json`;
+        stage = 'setup';
         const volumeRoot = process.env['DATABRICKS_VOLUME_FILES'];
         if (!volumeRoot) throw new Error('files volume is not configured');
 
-        stage = 'volume';
+        stage = 'volume_access';
         const userFiles = appkit.files('files').asUser(req);
         if (!(await userFiles.exists(relativePath))) {
           try {
+            stage = 'volume_write';
             await userFiles.upload(relativePath, req.body, { overwrite: false });
           } catch (error) {
             if (!isAlreadyExists(error)) throw error;
@@ -317,8 +366,7 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           actor: actorOf(req) ?? 'unverified',
           task_id: req.params.taskId,
           stage,
-          status: errorStatus(error),
-          error,
+          ...safeErrorFields(error),
         });
         const failure = uploadFailure(error, stage);
         friendlyFailure(res, failure.status, failure.message);
