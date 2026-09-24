@@ -78,7 +78,8 @@ export async function extractImage(
   const envelope = (await response.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
   const content = envelope.choices?.[0]?.message?.content;
   if (typeof content !== 'string') throw new Error('image extraction returned no structured output');
-  const extracted = modelOutputSchema.parse(JSON.parse(content));
+  const fenced = content.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const extracted = modelOutputSchema.parse(JSON.parse(fenced?.[1] ?? content));
   let sum = 0n;
   const rejected_rows: ImageExtractionArtifact['rejected_rows'] = [];
   const rows = extracted.rows.flatMap((row, index): ImageArtifactRow[] => {

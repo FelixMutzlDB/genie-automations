@@ -38,10 +38,9 @@ describe('image extraction financial gates', () => {
           choices: [
             {
               message: {
-                content: JSON.stringify({
-                  rows: [{ remittance_id: 'R1', invoice_id: 'I1', amount: '10.00' }],
-                  stated_total: '11.00',
-                }),
+                content: `\`\`\`json
+${JSON.stringify({ rows: [{ remittance_id: 'R1', invoice_id: 'I1', amount: '10.00' }], stated_total: '11.00' })}
+\`\`\``,
               },
             },
           ],
