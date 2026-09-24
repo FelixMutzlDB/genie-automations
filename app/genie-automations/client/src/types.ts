@@ -1,0 +1,65 @@
+export interface ToolEvent {
+  tool: string;
+  args: Record<string, unknown>;
+  result: unknown;
+}
+
+export interface Proposal {
+  proposal_id: string;
+  task_id: string;
+  change_type: string;
+  state: string;
+  proposer_id: string | null;
+  approver_id: string | null;
+  diff: Record<string, unknown>;
+}
+
+export interface Task {
+  task_id: string;
+  name: string;
+  task_type: string;
+  ingest_enabled: boolean;
+  target_catalog: string | null;
+  target_schema: string | null;
+  target_table: string | null;
+  org_id: string;
+  role: 'owner' | 'member' | null;
+  member_count: number;
+}
+
+export interface ParsePreview {
+  parse_id: string;
+  sha256: string;
+  status: 'ready' | 'rejected';
+  rows: Array<{ values: Record<string, string | null>; source_row: number }>;
+  rejected_rows: Array<{ code: string; guidance: string; source_row: number | null }>;
+  warnings: string[];
+}
+
+export interface Activity {
+  user_id: string;
+  action: string;
+  status: 'success' | 'failure';
+  detail: unknown;
+  proposal_id: string | null;
+  occurred_at: string;
+}
+
+export interface ChatResponse {
+  reply?: string;
+  tool_events?: ToolEvent[];
+  proposals?: Proposal[];
+  error?: string;
+  sqlstate?: string;
+}
+
+export interface ActionResponse {
+  ok: boolean;
+  result?: unknown;
+  audit?: Record<string, unknown> | null;
+  sqlstate?: string;
+  error?: string;
+}
+
+export type Msg = { role: 'you' | 'co-worker'; text: string; events?: ToolEvent[] };
+export type Outcome = { kind: 'success' | 'error'; message: string; technical?: unknown };

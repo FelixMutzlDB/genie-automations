@@ -1,124 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
   Alert,
   AlertDescription,
-  Badge,
   Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
   Empty,
   EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyTitle,
-  Input,
-  Label,
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
   Skeleton,
-  Switch,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  Tooltip,
-  TooltipContent,
   TooltipProvider,
-  TooltipTrigger,
 } from '@databricks/appkit-ui/react';
-import { Bot, Plus, Send, ShieldCheck, User, Wrench } from 'lucide-react';
+import { Plus } from 'lucide-react';
+import { AppHeader } from './components/AppHeader';
+import { ChatView } from './components/ChatView';
+import { CreateTaskDialog } from './components/CreateTaskDialog';
+import { DetailsPanel } from './components/DetailsPanel';
+import { IngestDialog } from './components/IngestDialog';
 import { TaskContext } from './TaskContext';
-import { humanizeActor, summarizeChange } from './lib/humanize';
 import { loadCanonicalIdentity } from './lib/identity';
 import { joinAndReloadTasks } from './lib/joinTask';
 import {
   abortableDelay,
   claimConfirmation,
   closeIngestSession,
-  humanizeIngestReject,
   isCurrentIngest,
   reduceIngest,
   type ActiveIngest,
   type IngestUiState,
   type PollStatus,
 } from './lib/ingestState';
-
-interface ToolEvent {
-  tool: string;
-  args: Record<string, unknown>;
-  result: unknown;
-}
-interface Proposal {
-  proposal_id: string;
-  task_id: string;
-  change_type: string;
-  state: string;
-  proposer_id: string | null;
-  approver_id: string | null;
-  diff: Record<string, unknown>;
-}
-interface Task {
-  task_id: string;
-  name: string;
-  task_type: string;
-  ingest_enabled: boolean;
-  target_catalog: string | null;
-  target_schema: string | null;
-  target_table: string | null;
-  org_id: string;
-  role: 'owner' | 'member' | null;
-  member_count: number;
-}
-interface ParsePreview {
-  parse_id: string;
-  sha256: string;
-  status: 'ready' | 'rejected';
-  rows: Array<{ values: Record<string, string | null>; source_row: number }>;
-  rejected_rows: Array<{ code: string; guidance: string; source_row: number | null }>;
-  warnings: string[];
-}
-interface Activity {
-  user_id: string;
-  action: string;
-  status: 'success' | 'failure';
-  detail: unknown;
-  proposal_id: string | null;
-  occurred_at: string;
-}
-interface ChatResponse {
-  reply?: string;
-  tool_events?: ToolEvent[];
-  proposals?: Proposal[];
-  error?: string;
-  sqlstate?: string;
-}
-interface ActionResponse {
-  ok: boolean;
-  result?: unknown;
-  audit?: Record<string, unknown> | null;
-  sqlstate?: string;
-  error?: string;
-}
-type Msg = { role: 'you' | 'co-worker'; text: string; events?: ToolEvent[] };
-type Outcome = { kind: 'success' | 'error'; message: string; technical?: unknown };
+import type { ActionResponse, Activity, ChatResponse, Msg, Outcome, ParsePreview, Proposal, Task } from './types';
 
 const START_MESSAGE: Msg = {
   role: 'co-worker',
@@ -136,61 +48,6 @@ const GA_HELP: Record<string, string> = {
 };
 const FRIENDLY_ERROR = 'Something went wrong applying that change. Nothing was changed.';
 const FRIENDLY_CHAT_ERROR = "I couldn't complete that — could you rephrase?";
-const SUGGESTIONS = ['List the remittances', 'Correct allocation A-2 on RDEMO-1 to 1150', 'Show vendors'];
-const ACTIVITY_LABELS: Record<string, string> = {
-  chat: 'Asked the co-worker',
-  approve: 'Approved a change',
-  commit: 'Applied a change',
-  ingest_confirm: 'Confirmed uploaded rows for review',
-  task_created: 'Created this automation',
-  joined: 'Joined this automation',
-};
-const STATE_LABELS: Record<string, string> = {
-  staged: 'Awaiting review',
-  validated: 'Checked',
-  approved: 'Approved',
-  committed: 'Applied',
-  rejected: 'Rejected',
-  expired: 'Expired',
-};
-
-function taskTypeLabel(type: string): string {
-  if (type.includes('allocation') || type === 'receivables') return 'Receivables';
-  if (type.includes('vendor_bank')) return 'Vendor bank';
-  return 'Custom';
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return 'Details unavailable';
-  }
-}
-
-function toolSummary(event: ToolEvent): string {
-  const rows = Array.isArray(event.result) ? event.result.length : null;
-  const labels: Record<string, string> = {
-    list_tasks: 'Looked up available automations',
-    list_remittances: 'Looked up remittances',
-    list_vendors: 'Looked up vendors',
-    get_proposal: 'Checked the proposed change',
-    stage_allocation_correction: 'Prepared an allocation change for review',
-    stage_vendor_bank_update: 'Prepared a bank-details change for review',
-  };
-  const label = labels[event.tool] ?? 'Ran a step';
-  return rows === null ? `${label}.` : `${label} — found ${rows}.`;
-}
-
-function relativeTime(value: string): string {
-  const elapsed = Date.now() - new Date(value).getTime();
-  if (!Number.isFinite(elapsed)) return 'Recently';
-  const minutes = Math.max(0, Math.round(elapsed / 60_000));
-  if (minutes < 1) return 'Just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  return hours < 24 ? `${hours} hr ago` : `${Math.round(hours / 24)} days ago`;
-}
 
 function appliedMessage(proposal: Proposal): string {
   const target =
@@ -660,55 +517,16 @@ export default function App() {
     <TaskContext.Provider value={taskContext}>
       <TooltipProvider>
         <div className="h-screen flex flex-col bg-background text-foreground">
-          <header className="border-b px-5 py-3 flex flex-wrap items-center gap-3">
-            <ShieldCheck className="h-5 w-5 text-primary" aria-hidden="true" />
-            <h1 className="text-base font-semibold">Genie automations</h1>
-            <Select value={selectedTaskId ?? undefined} onValueChange={handleTaskChoice}>
-              <SelectTrigger className="w-[280px]" aria-label="Select automation">
-                <SelectValue placeholder={tasksLoading ? 'Loading automations…' : 'Choose an automation'} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Your automations</SelectLabel>
-                  {ownTasks.map((task) => (
-                    <SelectItem key={task.task_id} value={task.task_id}>
-                      {task.name} · {taskTypeLabel(task.task_type)}
-                      {task.role === 'owner' ? ' · Owner' : ''}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-                {availableTasks.length > 0 && (
-                  <>
-                    <SelectSeparator />
-                    <SelectGroup>
-                      <SelectLabel>Available to join</SelectLabel>
-                      {availableTasks.map((task) => (
-                        <SelectItem key={task.task_id} value={`__join__:${task.task_id}`}>
-                          Join · {task.name}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </>
-                )}
-                <SelectSeparator />
-                <SelectItem value="__new__">
-                  <Plus className="h-4 w-4" /> New automation…
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            {selectedTask && (
-              <span className="text-xs text-muted-foreground">{taskTypeLabel(selectedTask.task_type)}</span>
-            )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge variant="secondary" className="ml-auto gap-1.5">
-                  <User className="h-3.5 w-3.5" />
-                  {!identityResolved ? 'Loading…' : identity ? humanizeActor(identity) : 'Unknown user'}
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>Actions you take are recorded under your own name.</TooltipContent>
-            </Tooltip>
-          </header>
+          <AppHeader
+            identity={identity}
+            identityResolved={identityResolved}
+            tasksLoading={tasksLoading}
+            selectedTaskId={selectedTaskId}
+            selectedTask={selectedTask}
+            ownTasks={ownTasks}
+            availableTasks={availableTasks}
+            onTaskChoice={handleTaskChoice}
+          />
           {notice && (
             <div
               role="status"
@@ -743,441 +561,60 @@ export default function App() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] flex-1 min-h-0">
-              <main className="flex flex-col min-h-0 border-r" aria-label="Conversation">
-                <div ref={scrollRef} className="flex-1 overflow-auto p-5 space-y-4">
-                  {messages.map((message) => (
-                    <div key={`${message.role}-${message.text}`} className={message.role === 'you' ? 'text-right' : ''}>
-                      <div className="text-xs text-muted-foreground mb-1">
-                        {message.role === 'you' ? 'You' : 'Co-worker'}
-                      </div>
-                      <div
-                        className={`inline-block max-w-[85%] rounded-lg border px-3 py-2 text-left whitespace-pre-wrap ${message.role === 'you' ? 'bg-muted' : 'bg-card'}`}
-                      >
-                        {message.text}
-                      </div>
-                      {message.events && message.events.length > 0 && (
-                        <Accordion type="single" collapsible className="text-left mt-1">
-                          <AccordionItem value="steps">
-                            <AccordionTrigger className="text-xs text-muted-foreground justify-start gap-2">
-                              <Wrench className="h-3 w-3" /> Show what I did
-                            </AccordionTrigger>
-                            <AccordionContent className="space-y-2">
-                              {message.events.map((event) => (
-                                <div
-                                  key={`${event.tool}-${safeJson(event.args)}`}
-                                  className="text-sm border-l-2 border-primary pl-3"
-                                >
-                                  <p>{toolSummary(event)}</p>
-                                  <Accordion type="single" collapsible>
-                                    <AccordionItem value="raw">
-                                      <AccordionTrigger className="text-xs">Raw</AccordionTrigger>
-                                      <AccordionContent>
-                                        <pre className="text-xs overflow-auto whitespace-pre-wrap bg-muted p-2 rounded">
-                                          {safeJson({ args: event.args, result: event.result })}
-                                        </pre>
-                                      </AccordionContent>
-                                    </AccordionItem>
-                                  </Accordion>
-                                </div>
-                              ))}
-                            </AccordionContent>
-                          </AccordionItem>
-                        </Accordion>
-                      )}
-                    </div>
-                  ))}
-                  {busy && <p className="text-sm text-muted-foreground">Working on that…</p>}
-                </div>
-                <div className="border-t px-5 py-2 flex flex-wrap gap-2">
-                  {SUGGESTIONS.map((suggestion) => (
-                    <Button key={suggestion} size="sm" variant="outline" onClick={() => void send(suggestion)}>
-                      {suggestion}
-                    </Button>
-                  ))}
-                </div>
-                <div className="border-t p-3 flex gap-2">
-                  <input
-                    ref={fileInputRef}
-                    className="hidden"
-                    type="file"
-                    accept=".csv,.xlsx"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        setIngestOpen(true);
-                        void uploadForPreview(file);
-                      }
-                      event.target.value = '';
-                    }}
-                  />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    disabled={!canIngest}
-                    title={
-                      canIngest
-                        ? 'Upload CSV or Excel for a safe preview'
-                        : 'Enable ingest and bind a catalog, schema, and table first'
-                    }
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                  <Input
-                    className="flex-1"
-                    placeholder="Ask the co-worker…"
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') void send(input);
-                    }}
-                  />
-                  <Button onClick={() => void send(input)} disabled={busy || !input.trim()}>
-                    <Send className="h-4 w-4" />
-                    <span className="sr-only">Send</span>
-                  </Button>
-                </div>
-              </main>
-              <aside className="min-h-0 overflow-auto p-4" aria-label="Automation details">
-                <Tabs defaultValue="proposals">
-                  <TabsList className="w-full">
-                    <TabsTrigger value="proposals">Proposals</TabsTrigger>
-                    <TabsTrigger value="activity">Activity</TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="proposals" className="space-y-3 pt-3">
-                    {proposals.length === 0 && (
-                      <Empty>
-                        <EmptyHeader>
-                          <EmptyTitle>No proposals yet</EmptyTitle>
-                        </EmptyHeader>
-                        <EmptyDescription>Ask the co-worker to prepare a change.</EmptyDescription>
-                      </Empty>
-                    )}
-                    {proposals.map((proposal) => {
-                      const canApprove = proposal.state === 'staged' || proposal.state === 'validated';
-                      const canApply = proposal.state === 'approved';
-                      const isProposer = proposal.proposer_id === identity;
-                      const outcome = outcomes[proposal.proposal_id];
-                      return (
-                        <Card key={proposal.proposal_id}>
-                          <CardHeader className="pb-2">
-                            <div className="flex items-start gap-2">
-                              <CardTitle className="text-base">
-                                {summarizeChange(proposal.change_type, proposal.diff)}
-                              </CardTitle>
-                              <Badge
-                                className={`ml-auto shrink-0 ${proposal.state === 'committed' ? 'bg-success text-success-foreground' : proposal.state === 'rejected' ? 'bg-destructive text-destructive-foreground' : ''}`}
-                                variant="secondary"
-                              >
-                                {STATE_LABELS[proposal.state] ?? 'In review'}
-                              </Badge>
-                            </div>
-                          </CardHeader>
-                          <CardContent className="space-y-3">
-                            <div className="text-sm text-muted-foreground">
-                              <p>Proposed by {humanizeActor(proposal.proposer_id)}</p>
-                              {proposal.approver_id && <p>Approved by {humanizeActor(proposal.approver_id)}</p>}
-                            </div>
-                            <div className="flex gap-2">
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <span>
-                                    <Button
-                                      size="sm"
-                                      variant="secondary"
-                                      disabled={!canApprove || isProposer}
-                                      onClick={() => void act('approve', proposal)}
-                                    >
-                                      Approve
-                                    </Button>
-                                  </span>
-                                </TooltipTrigger>
-                                {isProposer && (
-                                  <TooltipContent>A second person must approve a change you proposed.</TooltipContent>
-                                )}
-                              </Tooltip>
-                              <Button size="sm" disabled={!canApply} onClick={() => void act('commit', proposal)}>
-                                Apply
-                              </Button>
-                            </div>
-                            {outcome && (
-                              <Alert variant={outcome.kind === 'error' ? 'destructive' : 'default'}>
-                                <AlertDescription>{outcome.message}</AlertDescription>
-                              </Alert>
-                            )}
-                            <Accordion type="single" collapsible>
-                              <AccordionItem value="technical">
-                                <AccordionTrigger>Technical details</AccordionTrigger>
-                                <AccordionContent>
-                                  <pre className="text-xs overflow-auto whitespace-pre-wrap bg-muted p-2 rounded">
-                                    {safeJson({
-                                      proposal_id: proposal.proposal_id,
-                                      change_type: proposal.change_type,
-                                      diff: proposal.diff,
-                                      audit: outcome?.technical,
-                                    })}
-                                  </pre>
-                                </AccordionContent>
-                              </AccordionItem>
-                            </Accordion>
-                          </CardContent>
-                        </Card>
-                      );
-                    })}
-                  </TabsContent>
-                  <TabsContent value="activity" className="space-y-3 pt-3">
-                    {activity.length === 0 && (
-                      <Empty>
-                        <EmptyHeader>
-                          <EmptyTitle>No activity yet</EmptyTitle>
-                        </EmptyHeader>
-                        <EmptyDescription>Actions for this automation will appear here.</EmptyDescription>
-                      </Empty>
-                    )}
-                    {activity.map((item) => (
-                      <div
-                        key={`${item.occurred_at}-${item.action}-${item.proposal_id ?? item.user_id}`}
-                        className="flex gap-3 border-b pb-3"
-                      >
-                        <Bot className="h-4 w-4 mt-1 text-muted-foreground" aria-hidden="true" />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium">
-                            {ACTIVITY_LABELS[item.action] ?? 'Worked on this automation'}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {humanizeActor(item.user_id)} ·{' '}
-                            <time dateTime={item.occurred_at} title={new Date(item.occurred_at).toLocaleString()}>
-                              {relativeTime(item.occurred_at)}
-                            </time>
-                          </p>
-                        </div>
-                        <Badge
-                          variant={item.status === 'failure' ? 'destructive' : 'secondary'}
-                          className={item.status === 'success' ? 'bg-success text-success-foreground' : ''}
-                        >
-                          {item.status === 'success' ? 'Succeeded' : 'Failed'}
-                        </Badge>
-                      </div>
-                    ))}
-                  </TabsContent>
-                </Tabs>
-              </aside>
+              <ChatView
+                messages={messages}
+                busy={busy}
+                input={input}
+                canIngest={canIngest}
+                scrollRef={scrollRef}
+                fileInputRef={fileInputRef}
+                onInputChange={setInput}
+                onSend={(text) => void send(text)}
+                onUpload={(file) => {
+                  setIngestOpen(true);
+                  void uploadForPreview(file);
+                }}
+              />
+              <DetailsPanel
+                proposals={proposals}
+                activity={activity}
+                identity={identity}
+                outcomes={outcomes}
+                onAction={(kind, proposal) => void act(kind, proposal)}
+              />
             </div>
           )}
-          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>New automation</DialogTitle>
-                <DialogDescription>Set up a shared workflow for your team.</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="automation-name">Name</Label>
-                  <Input
-                    id="automation-name"
-                    value={createName}
-                    onChange={(event) => setCreateName(event.target.value)}
-                    placeholder="Monthly receivables"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="automation-type">Type</Label>
-                  <Select value={createType} onValueChange={setCreateType}>
-                    <SelectTrigger id="automation-type">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="allocation_upsert">Receivables collection</SelectItem>
-                      <SelectItem value="vendor_bank_update">Vendor bank details</SelectItem>
-                      <SelectItem value="custom">Custom</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <Label htmlFor="ingest-enabled">This automation collects &amp; stores data</Label>
-                  <Switch id="ingest-enabled" checked={ingestEnabled} onCheckedChange={setIngestEnabled} />
-                </div>
-                {ingestEnabled && (
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="space-y-2">
-                      <Label htmlFor="target-catalog">Target catalog</Label>
-                      <Input
-                        id="target-catalog"
-                        value={targetCatalog}
-                        onChange={(event) => setTargetCatalog(event.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="target-schema">Target schema</Label>
-                      <Input
-                        id="target-schema"
-                        value={targetSchema}
-                        onChange={(event) => setTargetSchema(event.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="target-table">Target table</Label>
-                      <Input
-                        id="target-table"
-                        value={targetTable}
-                        onChange={(event) => setTargetTable(event.target.value)}
-                      />
-                    </div>
-                  </div>
-                )}
-                {createError && (
-                  <Alert variant="destructive">
-                    <AlertDescription>{createError}</AlertDescription>
-                  </Alert>
-                )}
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setCreateOpen(false)}>
-                  Cancel
-                </Button>
-                <Button disabled={creating} onClick={() => void createTask()}>
-                  {creating ? 'Creating…' : 'Create automation'}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-          <Dialog
+          <CreateTaskDialog
+            open={createOpen}
+            name={createName}
+            type={createType}
+            ingestEnabled={ingestEnabled}
+            targetCatalog={targetCatalog}
+            targetSchema={targetSchema}
+            targetTable={targetTable}
+            error={createError}
+            creating={creating}
+            onOpenChange={setCreateOpen}
+            onNameChange={setCreateName}
+            onTypeChange={setCreateType}
+            onIngestEnabledChange={setIngestEnabled}
+            onTargetCatalogChange={setTargetCatalog}
+            onTargetSchemaChange={setTargetSchema}
+            onTargetTableChange={setTargetTable}
+            onCreate={() => void createTask()}
+          />
+          <IngestDialog
             open={ingestOpen}
-            onOpenChange={(open) => {
-              if (open) setIngestOpen(true);
-              else closeIngest();
-            }}
-          >
-            <DialogContent className="max-w-4xl max-h-[85vh] overflow-auto">
-              <DialogHeader>
-                <DialogTitle>File parse preview</DialogTitle>
-                <DialogDescription>
-                  Review and select the rows you want to prepare for a separate human review.
-                </DialogDescription>
-              </DialogHeader>
-              {ingestState.phase === 'uploading' && <p>Uploading the original bytes and checking their fingerprint…</p>}
-              {ingestState.phase === 'parsing' && <p>Parsing safely in a separate job…</p>}
-              {ingestState.phase === 'error' && (
-                <Alert variant="destructive">
-                  <AlertDescription>{ingestState.message}</AlertDescription>
-                </Alert>
-              )}
-              {ingestState.phase === 'confirming' && <p>Preparing the selected rows for review…</p>}
-              {ingestState.phase === 'staged' && (
-                <Alert>
-                  <AlertDescription>
-                    {ingestState.message ??
-                      'Staged for review. The proposals are now available in the Proposals panel for another person to approve.'}
-                  </AlertDescription>
-                </Alert>
-              )}
-              {ingestState.phase === 'preview' && preview && (
-                <div className="space-y-4">
-                  <p className="text-xs text-muted-foreground break-all">SHA-256: {preview.sha256}</p>
-                  {preview.warnings.map((warning) => (
-                    <Alert key={warning}>
-                      <AlertDescription>{warning}</AlertDescription>
-                    </Alert>
-                  ))}
-                  {preview.rejected_rows.map((rejected) => (
-                    <Alert key={`${rejected.code}-${rejected.source_row}`} variant="destructive">
-                      <AlertDescription>
-                        {(() => {
-                          const friendly = humanizeIngestReject(rejected.code);
-                          return `${friendly.title}. ${friendly.guidance}${rejected.source_row ? ` Source row ${rejected.source_row}.` : ''}`;
-                        })()}
-                      </AlertDescription>
-                    </Alert>
-                  ))}
-                  {preview.rows.length === 0 ? (
-                    <Empty>
-                      <EmptyHeader>
-                        <EmptyTitle>No accepted rows</EmptyTitle>
-                      </EmptyHeader>
-                      <EmptyDescription>Review the guidance above.</EmptyDescription>
-                    </Empty>
-                  ) : (
-                    <div className="space-y-3">
-                      {!['reconciliation', 'allocation_upsert', 'receivables'].includes(
-                        selectedTask?.task_type ?? ''
-                      ) && (
-                        <Alert>
-                          <AlertDescription>
-                            Staging from upload is currently available for receivables collection only
-                          </AlertDescription>
-                        </Alert>
-                      )}
-                      {['reconciliation', 'allocation_upsert', 'receivables'].includes(
-                        selectedTask?.task_type ?? ''
-                      ) && (
-                        <p className="text-sm">
-                          {selectedPreviewRows.size === 0
-                            ? 'Select the rows to stage. Nothing is applied yet.'
-                            : `${selectedPreviewRows.size} ${selectedPreviewRows.size === 1 ? 'row' : 'rows'} selected. Confirming will create proposals for human review.`}
-                        </p>
-                      )}
-                      <div className="overflow-auto rounded-md border">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b bg-muted">
-                              <th className="p-2 text-left">Select</th>
-                              <th className="p-2 text-left">Source row</th>
-                              {Object.keys(preview.rows[0]?.values ?? {}).map((column) => (
-                                <th key={column} className="p-2 text-left">
-                                  {column.replaceAll('_', ' ')}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {preview.rows.map((row) => (
-                              <tr key={row.source_row} className="border-b">
-                                <td className="p-2">
-                                  <input
-                                    type="checkbox"
-                                    aria-label={`Select source row ${row.source_row}`}
-                                    checked={selectedPreviewRows.has(row.source_row)}
-                                    onChange={(event) =>
-                                      setSelectedPreviewRows((current) => {
-                                        const next = new Set(current);
-                                        if (event.target.checked) next.add(row.source_row);
-                                        else next.delete(row.source_row);
-                                        return next;
-                                      })
-                                    }
-                                  />
-                                </td>
-                                <td className="p-2">{row.source_row}</td>
-                                {Object.keys(preview.rows[0]?.values ?? {}).map((column) => (
-                                  <td key={column} className="p-2">
-                                    {row.values[column] ?? '—'}
-                                  </td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              <DialogFooter>
-                <Button variant="outline" onClick={closeIngest}>
-                  Close
-                </Button>
-                {ingestState.phase === 'preview' &&
-                  ['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask?.task_type ?? '') && (
-                    <Button
-                      disabled={selectedPreviewRows.size === 0 || confirmSubmitting}
-                      onClick={() => void confirmPreview()}
-                    >
-                      Confirm selected rows
-                    </Button>
-                  )}
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            state={ingestState}
+            preview={preview}
+            selectedRows={selectedPreviewRows}
+            selectedTask={selectedTask}
+            confirmSubmitting={confirmSubmitting}
+            onOpen={() => setIngestOpen(true)}
+            onClose={closeIngest}
+            onSelectedRowsChange={setSelectedPreviewRows}
+            onConfirm={() => void confirmPreview()}
+          />
         </div>
       </TooltipProvider>
     </TaskContext.Provider>
