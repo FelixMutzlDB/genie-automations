@@ -20,6 +20,15 @@ variables:
   config_destination_allowlist_secret_key:
     description: Secret key containing comma-separated fully-qualified deployment-approved destinations.
     default: destination-allowlist
+  projection_warehouse_id:
+    description: Serverless or Pro SQL warehouse used to create the governed projection view.
+    default: f7cdb11888c4799e
+  projection_postgres_endpoint:
+    description: Lakebase endpoint resource read by the projection publisher.
+    default: projects/genie-automations/branches/production/endpoints/primary
+  projection_postgres_database_name:
+    description: PostgreSQL database name read by the projection publisher.
+    default: databricks_postgres
 
 resources:
   apps:
@@ -80,6 +89,38 @@ resources:
             client: '4'
             dependencies:
               - openpyxl
+
+    publish_receivables_projection:
+      name: '[${bundle.target}] genie-automations-publish-receivables-projection'
+      description: Publishes a governed Lakebase receivables snapshot and its read-only Genie view.
+      schedule:
+        quartz_cron_expression: '0 0/5 * * * ?'
+        timezone_id: UTC
+        pause_status: PAUSED
+      tasks:
+        - task_key: publish_delta_snapshot
+          spark_python_task:
+            python_file: ./projection/publish.py
+            parameters:
+              - --endpoint
+              - ${var.projection_postgres_endpoint}
+              - --database
+              - ${var.projection_postgres_database_name}
+          environment_key: projection
+        - task_key: create_projection_view
+          depends_on:
+            - task_key: publish_delta_snapshot
+          notebook_task:
+            notebook_path: ./projection/sql/create_receivables_projection.sql
+            source: WORKSPACE
+            warehouse_id: ${var.projection_warehouse_id}
+      environments:
+        - environment_key: projection
+          spec:
+            client: '4'
+            dependencies:
+              - databricks-sdk==0.81.0
+              - psycopg[binary]==3.2.10
 
 targets:
   default:
