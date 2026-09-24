@@ -31,6 +31,8 @@ variables:
     default: databricks_postgres
   projection_publisher_sp:
     description: Dedicated service principal application ID that runs the projection publisher. Required; do not use the app service principal.
+  genie_space_id:
+    description: Existing curated receivables Genie Space ID. Supply this bundle variable at deploy time.
 
 resources:
   apps:
@@ -49,6 +51,7 @@ resources:
         - postgres
         - serving.serving-endpoints
         - files.files
+        - dashboards.genie
 
       # The resources which this app has access to.
       resources:
@@ -80,6 +83,11 @@ resources:
             scope: ${var.config_secret_scope}
             key: ${var.config_destination_allowlist_secret_key}
             permission: READ
+        - name: genie-space
+          genie_space:
+            name: 'Receivables Collection — Ask Data'
+            space_id: ${var.genie_space_id}
+            permission: CAN_RUN
 
   jobs:
     parse_preview:
@@ -104,7 +112,7 @@ resources:
       schedule:
         quartz_cron_expression: '0 0/5 * * * ?'
         timezone_id: UTC
-        pause_status: PAUSED
+        pause_status: UNPAUSED
       tasks:
         - task_key: publish_delta_snapshot
           spark_python_task:

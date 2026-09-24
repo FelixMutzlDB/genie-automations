@@ -1,4 +1,4 @@
-import { createApp, files, jobs, lakebase, server } from '@databricks/appkit';
+import { createApp, files, genie, jobs, lakebase, server } from '@databricks/appkit';
 import { isIngestAppKit, setupIngestRoutes } from './routes/ingest';
 import { setupWhoamiRoute } from './routes/whoami';
 import { setupReconRoutes } from './routes/recon';
@@ -19,6 +19,7 @@ createApp({
       },
     }),
     jobs({ jobs: { default: { taskType: 'python_script' } } }),
+    genie(),
     server(),
   ],
   onPluginsReady(appkit) {
