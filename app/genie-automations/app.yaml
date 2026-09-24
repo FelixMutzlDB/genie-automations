@@ -12,3 +12,5 @@ env:
     valueFrom: config-admin-principals
   - name: CONFIG_DESTINATION_ALLOWLIST
     valueFrom: config-destination-allowlist
+  - name: DATABRICKS_GENIE_SPACE_ID
+    valueFrom: genie-space

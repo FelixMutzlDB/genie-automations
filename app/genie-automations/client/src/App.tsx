@@ -9,6 +9,10 @@ import {
   EmptyHeader,
   EmptyTitle,
   Skeleton,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   TooltipProvider,
 } from '@databricks/appkit-ui/react';
 import { Plus } from 'lucide-react';
@@ -17,6 +21,7 @@ import { ChatView } from './components/ChatView';
 import { CreateTaskDialog } from './components/CreateTaskDialog';
 import { DetailsPanel } from './components/DetailsPanel';
 import { IngestDialog } from './components/IngestDialog';
+import { GenieTab } from './components/GenieTab';
 import { TaskContext } from './TaskContext';
 import { loadWhoami } from './lib/identity';
 import { loadTaskConfig } from './lib/configGovernance';
@@ -311,6 +316,7 @@ export default function App() {
   }, [createName, createType, loadTasks]);
 
   const canIngest = selectedTask?.governance_status === 'active' && governedIngestEnabled;
+  const canAskData = ['reconciliation', 'allocation_upsert', 'receivables'].includes(selectedTask?.task_type ?? '');
 
   const uploadForPreview = useCallback(
     async (file: File) => {
@@ -569,35 +575,48 @@ export default function App() {
               </Empty>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] flex-1 min-h-0">
-              <ChatView
-                messages={messages}
-                busy={busy}
-                input={input}
-                canIngest={canIngest}
-                ingestDisabledReason="Upload and staging become available after an admin approves a destination and publishes an ingest-enabled configuration."
-                scrollRef={scrollRef}
-                fileInputRef={fileInputRef}
-                onInputChange={setInput}
-                onSend={(text) => void send(text)}
-                onUpload={(file) => {
-                  setIngestOpen(true);
-                  void uploadForPreview(file);
-                }}
-              />
-              <DetailsPanel
-                proposals={proposals}
-                activity={activity}
-                identity={identity}
-                outcomes={outcomes}
-                onAction={(kind, proposal) => void act(kind, proposal)}
-                selectedTask={selectedTask}
-                tasks={tasks}
-                isAdmin={isAdmin}
-                onIngestCapabilityChange={setGovernedIngestEnabled}
-                onGovernanceChanged={() => void loadTasks(selectedTask.task_id)}
-              />
-            </div>
+            <Tabs defaultValue="co-worker" className="flex flex-1 min-h-0 flex-col">
+              <TabsList className="mx-5 mt-3 w-fit">
+                <TabsTrigger value="co-worker">Co-worker</TabsTrigger>
+                {canAskData && <TabsTrigger value="ask-data">Ask data</TabsTrigger>}
+              </TabsList>
+              <TabsContent value="co-worker" className="flex-1 min-h-0 mt-3">
+                <div className="grid grid-cols-1 md:grid-cols-[1.6fr_1fr] h-full min-h-0">
+                  <ChatView
+                    messages={messages}
+                    busy={busy}
+                    input={input}
+                    canIngest={canIngest}
+                    ingestDisabledReason="Upload and staging become available after an admin approves a destination and publishes an ingest-enabled configuration."
+                    scrollRef={scrollRef}
+                    fileInputRef={fileInputRef}
+                    onInputChange={setInput}
+                    onSend={(text) => void send(text)}
+                    onUpload={(file) => {
+                      setIngestOpen(true);
+                      void uploadForPreview(file);
+                    }}
+                  />
+                  <DetailsPanel
+                    proposals={proposals}
+                    activity={activity}
+                    identity={identity}
+                    outcomes={outcomes}
+                    onAction={(kind, proposal) => void act(kind, proposal)}
+                    selectedTask={selectedTask}
+                    tasks={tasks}
+                    isAdmin={isAdmin}
+                    onIngestCapabilityChange={setGovernedIngestEnabled}
+                    onGovernanceChanged={() => void loadTasks(selectedTask.task_id)}
+                  />
+                </div>
+              </TabsContent>
+              {canAskData && (
+                <TabsContent value="ask-data" className="flex flex-1 min-h-0 mt-3">
+                  <GenieTab identity={identity} />
+                </TabsContent>
+              )}
+            </Tabs>
           )}
           <CreateTaskDialog
             open={createOpen}
