@@ -31,6 +31,11 @@ variables:
     default: databricks_postgres
   projection_publisher_sp:
     description: Dedicated service principal application ID that runs the projection publisher. Required; do not use the app service principal.
+  chase_scheduler_sp:
+    description: Dedicated service principal application ID that runs scheduled chase evaluation. Its Lakebase role receives only EXECUTE on the 004 scheduler functions.
+  chase_scheduler_cron:
+    description: Quartz cron expression for chase evaluation.
+    default: '0 0 * * * ?'
   genie_space_id:
     description: Existing curated receivables Genie Space ID. Supply this bundle variable at deploy time.
 
@@ -132,6 +137,33 @@ resources:
             warehouse_id: ${var.projection_warehouse_id}
       environments:
         - environment_key: projection
+          spec:
+            client: '4'
+            dependencies:
+              - databricks-sdk==0.81.0
+              - psycopg[binary]==3.2.10
+
+    chase_scheduler:
+      name: '[${bundle.target}] genie-automations-chase-scheduler'
+      description: Evaluates chase reminders into a pending outbox; the transport is intentionally no-op.
+      run_as:
+        service_principal_name: ${var.chase_scheduler_sp}
+      schedule:
+        quartz_cron_expression: ${var.chase_scheduler_cron}
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: evaluate_chase_reminders
+          spark_python_task:
+            python_file: ./chase_scheduler/scheduler.py
+            parameters:
+              - --endpoint
+              - ${var.projection_postgres_endpoint}
+              - --database
+              - ${var.projection_postgres_database_name}
+          environment_key: chase_scheduler
+      environments:
+        - environment_key: chase_scheduler
           spec:
             client: '4'
             dependencies:
