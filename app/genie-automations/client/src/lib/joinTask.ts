@@ -40,7 +40,13 @@ export async function joinAndReloadTasks<T extends JoinableTask>(
 
   const tasksResponse = await fetcher('/api/tasks');
   if (!tasksResponse.ok) throw new Error('tasks');
-  const tasks = (await tasksResponse.json()) as T[];
-  const membership = tasks.find((task) => task.task_id === taskId && task.role !== null);
-  return { joined: joinAccepted || Boolean(membership), role: joinedRole ?? membership?.role ?? undefined, tasks };
+  const tasks: unknown = await tasksResponse.json();
+  if (!Array.isArray(tasks)) throw new Error('Invalid tasks response');
+  const typedTasks = tasks as T[];
+  const membership = typedTasks.find((task) => task.task_id === taskId && task.role !== null);
+  return {
+    joined: joinAccepted || Boolean(membership),
+    role: joinedRole ?? membership?.role ?? undefined,
+    tasks: typedTasks,
+  };
 }

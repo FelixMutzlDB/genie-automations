@@ -35,4 +35,13 @@ describe('joinAndReloadTasks', () => {
 
     await expect(joinAndReloadTasks('task-1', fetcher)).resolves.toMatchObject({ joined: false });
   });
+
+  it('rejects a malformed refreshed task payload explicitly', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, role: 'member' }))
+      .mockResolvedValueOnce(jsonResponse({ tasks: [] }));
+
+    await expect(joinAndReloadTasks('task-1', fetcher)).rejects.toThrow('Invalid tasks response');
+  });
 });

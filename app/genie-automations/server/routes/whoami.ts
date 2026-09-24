@@ -18,6 +18,7 @@ export function setupWhoamiRoute(appkit: AppKitOBO): void {
   appkit.server.extend((app) => {
     app.get('/api/whoami', async (req, res) => {
       const forwardedEmail = req.header('x-forwarded-email') ?? null;
+      const canonicalForwardedEmail = forwardedEmail?.trim() || null;
       const hasToken = Boolean(req.header('x-forwarded-access-token'));
       try {
         const result = await appkit.lakebase.asUser(req).query('SELECT session_user, current_user');
@@ -25,7 +26,7 @@ export function setupWhoamiRoute(appkit: AppKitOBO): void {
         const sessionUser = row['session_user'];
         const isHuman = typeof sessionUser === 'string' && sessionUser.includes('@');
         res.json({
-          identity: forwardedEmail ?? (typeof sessionUser === 'string' ? sessionUser : null),
+          identity: canonicalForwardedEmail ?? (typeof sessionUser === 'string' ? sessionUser : null),
           forwarded_email: forwardedEmail,
           has_forwarded_token: hasToken,
           pg_session_user: sessionUser,

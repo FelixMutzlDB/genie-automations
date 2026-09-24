@@ -33,9 +33,9 @@ function requestIdOf(req: Request): string {
   return req.header('x-request-id') ?? req.header('x-databricks-request-id') ?? 'unavailable';
 }
 
-function sqlstateOf(err: unknown): string {
-  if (typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string') return err.code;
-  return 'unknown';
+function sqlstateOf(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err) || typeof err.code !== 'string') return undefined;
+  return /^[0-9A-Z]{5}$/.test(err.code) ? err.code : undefined;
 }
 
 function taskIdFor(name: string): string {
@@ -155,12 +155,12 @@ export function setupTaskRoutes(appkit: AppKitOBO): void {
         res.json({ ok: true, role: result.rows[0]['role'] });
       } catch (err) {
         const requestId = requestIdOf(req);
+        const sqlstate = sqlstateOf(err);
         console.error('Task join failed', {
           request_id: requestId,
           actor: userId,
           task_id: req.params.id,
-          sqlstate: sqlstateOf(err),
-          error: err,
+          ...(sqlstate ? { sqlstate } : {}),
         });
         res.status(500).json({
           ok: false,

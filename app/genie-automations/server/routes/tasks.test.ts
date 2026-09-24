@@ -1,4 +1,5 @@
 import { Application, Request, Response } from 'express';
+import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { clientSafeError, clientSafeSqlstate, GENERIC_SERVER_ERROR, setupReconRoutes } from './recon';
 import { setupTaskRoutes } from './tasks';
@@ -175,16 +176,13 @@ describe('task routes', () => {
       res
     );
 
-    expect(log).toHaveBeenCalledWith(
-      'Task join failed',
-      expect.objectContaining({
+    expect(log).toHaveBeenCalledWith('Task join failed', {
         request_id: 'request-123',
         actor: 'alice@example.com',
         task_id: 'vendor-bank-eu',
         sqlstate: '42501',
-        error: dbError,
-      })
-    );
+      });
+    expect(inspect(log.mock.calls)).not.toContain('private database details');
     expect(state.status).toBe(500);
     expect(state.body).toEqual({
       ok: false,

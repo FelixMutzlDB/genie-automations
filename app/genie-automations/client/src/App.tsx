@@ -47,6 +47,7 @@ import {
 import { Bot, Plus, Send, ShieldCheck, User, Wrench } from 'lucide-react';
 import { TaskContext } from './TaskContext';
 import { humanizeActor, summarizeChange } from './lib/humanize';
+import { loadCanonicalIdentity } from './lib/identity';
 import { joinAndReloadTasks } from './lib/joinTask';
 import {
   abortableDelay,
@@ -212,6 +213,7 @@ function isAbortError(error: unknown): boolean {
 
 export default function App() {
   const [identity, setIdentity] = useState<string | null>(null);
+  const [identityResolved, setIdentityResolved] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY));
@@ -321,7 +323,6 @@ export default function App() {
       const proposalData = (await proposalResponse.json()) as ChatResponse;
       const activityData = (await activityResponse.json()) as Activity[];
       if (signal?.aborted || selectedTaskIdRef.current !== taskId) return;
-      if (proposalData.identity) setIdentity(proposalData.identity);
       setProposals(proposalData.proposals ?? []);
       setActivity(activityData);
     } catch (error) {
@@ -337,12 +338,11 @@ export default function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const response = await fetch('/api/whoami', { signal: controller.signal });
-        if (!response.ok) return;
-        const data = (await response.json()) as { identity?: unknown };
-        if (typeof data.identity === 'string' && data.identity.trim()) setIdentity(data.identity);
+        setIdentity(await loadCanonicalIdentity(fetch, controller.signal));
       } catch (error) {
         if (!isAbortError(error)) setIdentity(null);
+      } finally {
+        if (!controller.signal.aborted) setIdentityResolved(true);
       }
     })();
     return () => controller.abort();
@@ -705,7 +705,7 @@ export default function App() {
               <TooltipTrigger asChild>
                 <Badge variant="secondary" className="ml-auto gap-1.5">
                   <User className="h-3.5 w-3.5" />
-                  {identity ? humanizeActor(identity) : 'Loading…'}
+                  {!identityResolved ? 'Loading…' : identity ? humanizeActor(identity) : 'Unknown user'}
                 </Badge>
               </TooltipTrigger>
               <TooltipContent>Actions you take are recorded under your own name.</TooltipContent>

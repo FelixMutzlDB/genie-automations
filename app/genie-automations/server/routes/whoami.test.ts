@@ -68,4 +68,15 @@ describe('/api/whoami', () => {
 
     expect(state.body?.identity).toBe('pg-user@example.com');
   });
+
+  it('falls back to the PostgreSQL session user for a blank forwarded email', async () => {
+    const handler = harness([{ session_user: 'pg-user@example.com', current_user: 'current-role' }]);
+    const req = { header: () => '   ' } as unknown as Request;
+    const { res, state } = response();
+
+    await handler?.(req, res);
+
+    expect(state.body?.identity).toBe('pg-user@example.com');
+    expect(state.body?.forwarded_email).toBe('   ');
+  });
 });
