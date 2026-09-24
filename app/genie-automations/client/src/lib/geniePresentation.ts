@@ -31,13 +31,13 @@ const MAX_ANSWER_LENGTH = 800;
 const MAX_SUGGESTION_LENGTH = 180;
 const SAFE_ANSWER_FALLBACK = 'Genie could not provide a safe text response. Try one of the suggested questions.';
 const TECHNICAL_LINE =
-  /(?:\bSQLSTATE\b|\bJDBC\b|\bODBC\b|\b(?:stack\s*trace|traceback)\b|\b(?:request|statement|trace|correlation)_?id\b|\b(?:error_code|error_class|exception)\b|^\s*at\s+[\w$.<>]+\s*\([^)]*:\d+(?::\d+)?\))/i;
+  /(?:\bSQLSTATE\b|\bJDBC\b|\bODBC\b|\b(?:stack\s*trace|traceback)\b|\b(?:request|statement|trace|correlation)_?id\b|\b(?:error_code|error_class|exception)\b|\bat\s+[\w$.<>]+\s*\([^)]*:\d+(?::\d+)?\))/i;
 const INTERNAL_FIELD_DUMP = /^\s*["']?[\w.-]+["']?\s*:\s*(?:["'{[]|null\b|true\b|false\b|-?\d)/i;
 const SQL_STATEMENT =
-  /(?:^|[;\n])\s*(?:SELECT\b[\s\S]{0,500}?\bFROM\b|WITH\b[\s\S]{0,500}?\bSELECT\b|INSERT\s+INTO\b|UPDATE\s+[\w.`"-]+\s+SET\b|DELETE\s+FROM\b|(?:DROP|ALTER|CREATE|TRUNCATE)\s+(?:TABLE|VIEW|SCHEMA|CATALOG)\b|(?:GRANT|REVOKE)\b[\s\S]{0,300}?\bON\b|MERGE\s+INTO\b)/i;
+  /(?:^|[.;]\s*)(?:SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|GRANT|REVOKE|CREATE|TRUNCATE|MERGE|EXEC)\b/i;
 const PROMPT_INJECTION =
   /(?:ignore\s+(?:all\s+)?(?:previous|prior|the\s+above)\s+instructions|disregard\s+(?:the\s+)?(?:above|previous|prior)(?:\s+instructions)?|(?:act|respond|pretend)\s+as\s+(?:the\s+)?(?:system|assistant|developer)\b|(?:^|\n)\s*(?:system|assistant|developer)\s*:|(?:system|assistant|developer)\s+(?:message|prompt|role)\s*:|<\|(?:system|assistant|developer)\|>|you\s+are\s+now\s+(?:the\s+)?(?:system|assistant|developer)\b)/i;
-const CONTROL_CHARACTER = /\p{Cc}/u;
+const SAFE_SUGGESTION_CHARACTERS = /^[\p{Script=Latin}0-9 ?.,'’()%$&/\-:]+$/u;
 
 function removeJsonBlobs(value: string): string {
   let output = value;
@@ -49,17 +49,36 @@ function removeJsonBlobs(value: string): string {
   return output;
 }
 
+function normalizeVisibleText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .normalize('NFKC')
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function codePointSlice(value: string, maximum: number): string {
+  return Array.from(value).slice(0, maximum).join('');
+}
+
+export function sanitizeGenieSuggestion(value: unknown): string {
+  const normalized = normalizeVisibleText(value);
+  if (!normalized || Array.from(normalized).length > MAX_SUGGESTION_LENGTH) return '';
+  if (!SAFE_SUGGESTION_CHARACTERS.test(normalized)) return '';
+  if (
+    TECHNICAL_LINE.test(normalized) ||
+    INTERNAL_FIELD_DUMP.test(normalized) ||
+    SQL_STATEMENT.test(normalized) ||
+    PROMPT_INJECTION.test(normalized)
+  ) return '';
+  return normalized;
+}
+
 export function sanitizeGenieText(value: unknown, fallback = '', maxLength = MAX_ANSWER_LENGTH): string {
-  if (typeof value !== 'string') return fallback;
-  const normalized = value.normalize('NFKC').replace(/[\p{Cf}\p{Cs}]/gu, '');
-  const boundedInput = [...normalized]
-    .slice(0, maxLength * 4)
-    .map((character) => {
-      return CONTROL_CHARACTER.test(character) && character !== '\n' && character !== '\r' && character !== '\t'
-        ? ' '
-        : character;
-    })
-    .join('');
+  const normalized = normalizeVisibleText(value);
+  if (!normalized) return fallback;
+  const boundedInput = codePointSlice(normalized, maxLength * 4);
   if (SQL_STATEMENT.test(boundedInput) || PROMPT_INJECTION.test(boundedInput)) return fallback;
   const withoutCodeBlocks = boundedInput.replace(/```[\s\S]{0,4000}?```/g, ' ');
   const withoutJson = removeJsonBlobs(withoutCodeBlocks);
@@ -81,7 +100,10 @@ export function sanitizeGenieText(value: unknown, fallback = '', maxLength = MAX
     SQL_STATEMENT.test(clean) ||
     PROMPT_INJECTION.test(clean)
   ) return fallback;
-  return clean.length <= maxLength ? clean : `${clean.slice(0, maxLength - 1).trimEnd()}…`;
+  const cleanCodePoints = Array.from(clean);
+  return cleanCodePoints.length <= maxLength
+    ? clean
+    : `${cleanCodePoints.slice(0, maxLength - 1).join('').trimEnd()}…`;
 }
 
 function messageStatusKind(message: GeniePresentationMessage): 'error' | 'completed' | null {
@@ -102,7 +124,7 @@ export function presentGenieMessage(message: GeniePresentationMessage | undefine
   const safeAnswer = sanitizeGenieText(message.content);
   const suggestedQuestions = message.attachments
     .flatMap((attachment) => attachment.suggestedQuestions ?? [])
-    .map((suggestion) => sanitizeGenieText(suggestion, '', MAX_SUGGESTION_LENGTH))
+    .map(sanitizeGenieSuggestion)
     .filter((suggestion, index, all) => suggestion && all.indexOf(suggestion) === index)
     .slice(0, 5);
   const kind: PresentedAnswer['kind'] = statusKind === 'error'

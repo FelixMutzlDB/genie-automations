@@ -39,5 +39,4 @@ describe('AppKit Genie read path', () => {
     expect(geniePlugin).toContain('this.asUser(req)._handleGetConversation');
     expect(geniePlugin).not.toMatch(forbiddenMutationPaths);
   });
-
 });
