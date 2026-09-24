@@ -1,13 +1,16 @@
 import { Application, Request, Response } from 'express';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupIngestRoutes } from './ingest';
 import { readFileSync } from 'node:fs';
 import { ConfigResolutionError } from '../config/resolveTaskConfig';
+import { calculateArtifactHash } from '../ingest/artifactIntegrity';
+import { sha256 } from '../ingest';
 
 const resolverMocks = vi.hoisted(() => ({
   activeConfigHash: vi.fn(),
   resolveTaskConfig: vi.fn(),
 }));
+const imageMocks = vi.hoisted(() => ({ extractImage: vi.fn() }));
 vi.mock('../config/resolveTaskConfig', () => ({
   ...resolverMocks,
   ConfigResolutionError: class ConfigResolutionError extends Error {
@@ -20,6 +23,9 @@ vi.mock('../config/resolveTaskConfig', () => ({
     }
   },
 }));
+vi.mock('../ingest/imageExtraction', () => imageMocks);
+
+beforeEach(() => imageMocks.extractImage.mockReset());
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
@@ -46,6 +52,8 @@ function harness(
     appRows?: Record<string, unknown>[];
     run?: Record<string, unknown>;
     artifact?: string;
+    landedBytes?: Buffer;
+    storedSha?: string;
   } = {}
 ) {
   resolverMocks.activeConfigHash.mockReset();
@@ -63,12 +71,23 @@ function harness(
   });
   const handlers = new Map<string, Handler>();
   const userQuery = vi.fn().mockResolvedValue({ rows: [gate] });
-  const appQuery = vi.fn().mockResolvedValue({ rows: options.appRows ?? [] });
+  let insertedSha: unknown;
+  const appQuery = vi.fn((sql: string, params?: unknown[]) => {
+    if (sql.includes('INSERT INTO genie_spike.ingest_run')) insertedSha = params?.[4];
+    if (sql.includes('SELECT sha256 FROM genie_spike.ingest_run'))
+      return Promise.resolve({ rows: [{ sha256: options.storedSha ?? insertedSha }] });
+    return Promise.resolve({ rows: options.appRows ?? [] });
+  });
   const upload = options.uploadError
     ? vi.fn().mockRejectedValue(options.uploadError)
     : vi.fn().mockResolvedValue(undefined);
   const exists = vi.fn().mockResolvedValue(options.exists ?? false);
   const read = vi.fn().mockResolvedValue(options.artifact ?? '{"status":"ready"}');
+  const landedBytes = options.landedBytes ?? Buffer.from('remittance_id,invoice_id,amount,pay_date\nR1,I1,10.00,2026-01-01\n');
+  const download = vi.fn().mockResolvedValue({
+    'content-length': landedBytes.length,
+    contents: new ReadableStream({ start(controller) { controller.enqueue(landedBytes); controller.close(); } }),
+  });
   const runNow = vi.fn().mockResolvedValue({ ok: true, data: { run_id: 77 } });
   const getRun = vi.fn().mockResolvedValue({
     ok: true,
@@ -85,12 +104,12 @@ function harness(
   } as Application;
   const appkit: Parameters<typeof setupIngestRoutes>[0] = {
     lakebase: { query: appQuery, asUser: () => ({ query: userQuery }) },
-    files: () => ({ asUser: () => ({ exists, upload, read }) }),
+    files: () => ({ asUser: () => ({ exists, upload, read, download }) }),
     jobs: () => ({ runNow, getRun, getRunOutput }),
     server: { extend: (register) => register(app) },
   };
   setupIngestRoutes(appkit);
-  return { handlers, appQuery, exists, upload, read, runNow, getRun, getRunOutput };
+  return { handlers, appQuery, exists, upload, read, download, runNow, getRun, getRunOutput };
 }
 
 function request(email: string | null = 'alice@example.com'): Request {
@@ -175,6 +194,73 @@ describe('ingest upload route', () => {
     expect(state.status).toBe(202);
     expect(runNow).toHaveBeenCalledOnce();
   });
+
+  it('reads landed Volume bytes back and rejects a SHA mismatch before inference', async () => {
+    const original = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(8)]);
+    const tampered = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(9)]);
+    const { handlers, download } = harness({}, { landedBytes: tampered });
+    const req = request();
+    req.body = original;
+    req.header = ((name: string) =>
+      name === 'x-forwarded-email'
+        ? 'alice@example.com'
+        : name === 'x-upload-filename'
+          ? 'input.png'
+          : name === 'x-forwarded-access-token'
+            ? 'obo'
+            : undefined) as Request['header'];
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(req, res);
+    expect(state.status).toBe(500);
+    expect(download).toHaveBeenCalledOnce();
+    expect(imageMocks.extractImage).not.toHaveBeenCalled();
+  });
+
+  it('runs image inference on the SHA-verified Volume bytes', async () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(8)]);
+    imageMocks.extractImage.mockResolvedValue({ status: 'ready', rows: [] });
+    const { handlers, download } = harness({}, { landedBytes: png });
+    const req = request();
+    req.body = Buffer.from(png);
+    req.header = ((name: string) =>
+      name === 'x-forwarded-email'
+        ? 'alice@example.com'
+        : name === 'x-upload-filename'
+          ? 'input.png'
+          : name === 'x-forwarded-access-token'
+            ? 'obo'
+            : undefined) as Request['header'];
+    const result = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(req, result.res);
+    expect(result.state.status).toBe(202);
+    expect(download).toHaveBeenCalledOnce();
+    expect(imageMocks.extractImage).toHaveBeenCalledWith(
+      req,
+      expect.objectContaining({ raw: png, mimeType: 'image/png', sha256: sha256(png) })
+    );
+  });
+
+  it('rejects when ingest_run stores a different source SHA', async () => {
+    const body = Buffer.from('remittance_id,invoice_id,amount,pay_date\nR1,I1,10.00,2026-01-01\n');
+    const { handlers, runNow } = harness({}, { landedBytes: body, storedSha: 'f'.repeat(64) });
+    const result = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(request(), result.res);
+    expect(result.state.status).toBe(500);
+    expect(runNow).not.toHaveBeenCalled();
+  });
+
+  it('routes from detected image bytes and rejects a conflicting filename', async () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(8)]);
+    const { handlers, upload } = harness({}, { landedBytes: png });
+    const req = request();
+    req.body = png;
+    req.header = ((name: string) =>
+      name === 'x-forwarded-email' ? 'alice@example.com' : name === 'x-upload-filename' ? 'input.jpg' : undefined) as Request['header'];
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/:taskId/upload')?.(req, res);
+    expect(state.status).toBe(415);
+    expect(upload).not.toHaveBeenCalled();
+  });
 });
 
 describe('ingest poll and preview routes', () => {
@@ -212,10 +298,12 @@ describe('ingest poll and preview routes', () => {
 });
 
 const PARSE_ID = '98e06e87-9d56-4e92-a530-4bd4ad5b1264';
+const SOURCE_SHA = 'b'.repeat(64);
 const CANONICAL_ARTIFACT = JSON.stringify({
   parse_id: PARSE_ID,
   config_version: 'receivables-v1',
   status: 'ready',
+  sha256: SOURCE_SHA,
   rows: [
     { source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } },
     { source_row: 3, values: { remittance_id: 'R-1', invoice_id: 'INV-2', amount: '20.00' } },
@@ -257,7 +345,7 @@ function confirmHarness(
       const owned = options.parseOwnedByCaller ?? true;
       return Promise.resolve({
         rows: owned
-          ? [{ task_id: 'receivables-eu', artifact_ref: 'artifact.json', config_version: 'receivables-v1' }]
+          ? [{ task_id: 'receivables-eu', artifact_ref: 'artifact.json', config_version: 'receivables-v1', sha256: SOURCE_SHA }]
           : [],
       });
     }
@@ -297,6 +385,7 @@ function confirmHarness(
         exists: vi.fn(),
         upload: vi.fn(),
         read: vi.fn().mockResolvedValue(options.artifact ?? CANONICAL_ARTIFACT),
+        download: vi.fn(),
       }),
     }),
     jobs: () => ({ runNow: vi.fn(), getRun: vi.fn(), getRunOutput: vi.fn() }),
@@ -320,16 +409,18 @@ const allowedTask = {
 
 describe('ingest confirm route', () => {
   it('rejects a probabilistic image artifact without an acknowledgement tied to its hash', async () => {
-    const artifact = JSON.stringify({
+    const artifactValue = {
       parse_id: PARSE_ID,
       config_version: 'receivables-v1',
       status: 'ready',
+      sha256: SOURCE_SHA,
       extraction_kind: 'probabilistic_image',
       modality: 'image',
       requires_human_confirmation: true,
-      artifact_hash: 'a'.repeat(64),
       rows: [{ source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } }],
-    });
+    };
+    const artifactHash = calculateArtifactHash(artifactValue);
+    const artifact = JSON.stringify({ ...artifactValue, artifact_hash: artifactHash });
     const { handlers, req, userQuery } = confirmHarness(allowedTask, { artifact });
     const { res, state } = response();
     await handlers.get('POST /api/ingest/confirm')?.(req, res);
@@ -339,11 +430,46 @@ describe('ingest confirm route', () => {
     req.body = {
       parse_id: PARSE_ID,
       selected_row_ids: [2],
-      human_review_acknowledgement: { parse_id: PARSE_ID, artifact_hash: 'a'.repeat(64), reviewed: true },
+      human_review_acknowledgement: { parse_id: PARSE_ID, artifact_hash: artifactHash, reviewed: true },
     };
     const accepted = response();
     await handlers.get('POST /api/ingest/confirm')?.(req, accepted.res);
     expect(accepted.state.status).toBe(201);
+  });
+
+  it('recomputes the artifact hash and rejects tampering that reuses an old acknowledgement', async () => {
+    const original = {
+      parse_id: PARSE_ID, config_version: 'receivables-v1', status: 'ready', sha256: SOURCE_SHA,
+      extraction_kind: 'probabilistic_image', modality: 'image', requires_human_confirmation: true,
+      rows: [{ source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } }],
+    };
+    const oldHash = calculateArtifactHash(original);
+    const tampered = JSON.stringify({ ...original, rows: [{ source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '999.00' } }], artifact_hash: oldHash });
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { artifact: tampered });
+    req.body = { parse_id: PARSE_ID, selected_row_ids: [2], human_review_acknowledgement: { parse_id: PARSE_ID, artifact_hash: oldHash, reviewed: true } };
+    const result = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, result.res);
+    expect(result.state.status).toBe(409);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
+  });
+
+  it('cannot stage a cross-foot-rejected image artifact', async () => {
+    const rejected = {
+      parse_id: PARSE_ID, config_version: 'receivables-v1', status: 'rejected', sha256: SOURCE_SHA,
+      extraction_kind: 'probabilistic_image', modality: 'image', requires_human_confirmation: true,
+      rows: [], rejected_rows: [{ code: 'IG_CROSS_FOOT_MISMATCH', guidance: 'Totals differ.', source_row: null }], warnings: [],
+    };
+    const artifact = JSON.stringify({ ...rejected, artifact_hash: calculateArtifactHash(rejected) });
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { artifact });
+    req.body = {
+      parse_id: PARSE_ID,
+      selected_row_ids: [2],
+      human_review_acknowledgement: { parse_id: PARSE_ID, artifact_hash: calculateArtifactHash(rejected), reviewed: true },
+    };
+    const result = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, result.res);
+    expect(result.state.status).toBe(409);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
   });
 
   it('rejects browser-supplied amounts or targets', async () => {
@@ -462,6 +588,7 @@ describe('ingest confirm route', () => {
       parse_id: PARSE_ID,
       config_version: 'receivables-v1',
       status: 'ready',
+      sha256: SOURCE_SHA,
       rows: [
         { source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } },
         { source_row: 3, values: { remittance_id: 'R-2', invoice_id: 'INV-2', amount: '20.00' } },

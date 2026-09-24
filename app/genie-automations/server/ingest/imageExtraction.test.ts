@@ -1,7 +1,8 @@
 import type { Request } from 'express';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { extractImage, parseImageMoney } from './imageExtraction';
+import { extractImage } from './imageExtraction';
+import { validateMoney } from './money';
 
 afterEach(() => {
   delete process.env['IMAGE_EXTRACTION_ENDPOINT'];
@@ -15,14 +16,18 @@ describe('image extraction financial gates', () => {
     expect(source).not.toMatch(/(?:approve_change|commit_change)\s*\(/);
   });
 
-  it.each([
+  it.each<[unknown, string | null]>([
     ['1,234.56', '1234.56'],
-    ['1.234,56', '1234.56'],
-    ['10', '10.00'],
+    ['(1,234.56)', '-1234.56'],
+    ['10', '10'],
     ['12.345', null],
     ['1e3', null],
     ['12.999', null],
-  ])('re-validates model money %s', (raw, expected) => expect(parseImageMoney(raw)).toBe(expected));
+    ['10000000000000000.00', null],
+  ])('re-validates model money %s with the shared deterministic grammar', (raw, expected) => {
+    if (expected === null) expect(() => validateMoney(raw)).toThrow();
+    else expect(validateMoney(raw)).toBe(expected);
+  });
 
   it('returns only typed review data and performs no staging call', async () => {
     process.env['IMAGE_EXTRACTION_ENDPOINT'] = 'configured-vision-endpoint';
@@ -41,9 +46,8 @@ describe('image extraction financial gates', () => {
       { raw: Buffer.from('image'), mimeType: 'image/png', parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264', configVersion: 'v1', sha256: 'a'.repeat(64) },
       fetchMock
     );
-    expect(artifact).toMatchObject({ extraction_kind: 'probabilistic_image', requires_human_confirmation: true });
-    expect(artifact.rows[0]?.review.amount).toBe('human_review_required');
-    expect(artifact.warnings).toContain('IG_CROSS_FOOT_MISMATCH: The extracted rows do not add up to the stated total.');
+    expect(artifact).toMatchObject({ status: 'rejected', extraction_kind: 'probabilistic_image', requires_human_confirmation: true, rows: [] });
+    expect(artifact.rejected_rows).toContainEqual(expect.objectContaining({ code: 'IG_CROSS_FOOT_MISMATCH' }));
     expect(JSON.stringify(artifact)).not.toContain('OCR');
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('stage_change');
   });

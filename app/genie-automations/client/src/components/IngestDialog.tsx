@@ -18,6 +18,15 @@ import { humanizeIngestReject, type IngestUiState } from '../lib/ingestState';
 import type { ParsePreview, Task } from '../types';
 
 const INGEST_SUPPORTED_TASK_TYPES = ['reconciliation', 'allocation_upsert', 'receivables'];
+const IMAGE_WARNING_TEXT: Record<string, string> = {
+  IG_CROSS_FOOT_MISMATCH: 'The extracted rows do not add up to the stated total. Upload a corrected image.',
+  IG_INVALID_STATED_TOTAL: 'The stated total could not be validated. Upload a corrected image.',
+};
+
+function humanizeImageWarning(warning: string): string {
+  const [code, ...detail] = warning.split(':');
+  return IMAGE_WARNING_TEXT[code] ?? (detail.join(':').trim() || warning.replace(/^IG_[A-Z_]+\s*/u, '').trim());
+}
 
 interface IngestDialogProps {
   open: boolean;
@@ -87,7 +96,7 @@ export function IngestDialog({
             )}
             {preview.warnings.map((warning) => (
               <Alert key={warning}>
-                <AlertDescription>{warning}</AlertDescription>
+                <AlertDescription>{humanizeImageWarning(warning)}</AlertDescription>
               </Alert>
             ))}
             {preview.rejected_rows.map((rejected) => (

@@ -135,6 +135,22 @@ const REJECTION_GUIDANCE: Record<string, { title: string; guidance: string }> = 
   IG014: { title: 'The file could not be opened', guidance: 'Export a fresh copy and try again.' },
   IG015: { title: 'This spreadsheet type is not supported', guidance: 'Use CSV or XLSX.' },
   IG016: { title: 'The uploaded file changed unexpectedly', guidance: 'Upload the original file again.' },
+  IG_INVALID_MONEY: {
+    title: 'An extracted amount could not be validated',
+    guidance: 'Check the amount in the image and upload a corrected source.',
+  },
+  IG_INVALID_STATED_TOTAL: {
+    title: 'The stated total could not be validated',
+    guidance: 'Check the total in the image and upload a corrected source.',
+  },
+  IG_CROSS_FOOT_MISMATCH: {
+    title: 'The extracted rows do not match the stated total',
+    guidance: 'Check the rows and total in the image and upload a corrected source.',
+  },
+  IG_REQUIRED_FIELD: {
+    title: 'An identifier is missing from the image extraction',
+    guidance: 'Check the remittance and invoice identifiers and upload a corrected source.',
+  },
 };
 
 export function humanizeIngestReject(code: string): { title: string; guidance: string } {
