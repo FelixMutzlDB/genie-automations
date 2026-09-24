@@ -31,7 +31,16 @@ export interface ParsePreview {
   parse_id: string;
   sha256: string;
   status: 'ready' | 'rejected';
-  rows: Array<{ values: Record<string, string | null>; source_row: number }>;
+  extraction_kind?: 'deterministic' | 'probabilistic_image';
+  modality?: 'image';
+  requires_human_confirmation?: boolean;
+  artifact_hash?: string;
+  rows: Array<{
+    values: Record<string, string | null>;
+    source_row: number;
+    review?: Record<string, 'human_review_required' | 'invalid'>;
+    evidence_refs?: Record<string, string>;
+  }>;
   rejected_rows: Array<{ code: string; guidance: string; source_row: number | null }>;
   warnings: string[];
 }

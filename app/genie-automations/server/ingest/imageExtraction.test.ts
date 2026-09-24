@@ -1,0 +1,50 @@
+import type { Request } from 'express';
+import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { extractImage, parseImageMoney } from './imageExtraction';
+
+afterEach(() => {
+  delete process.env['IMAGE_EXTRACTION_ENDPOINT'];
+  delete process.env['DATABRICKS_HOST'];
+});
+
+describe('image extraction financial gates', () => {
+  it('has no stage_change or guarded-procedure mutation capability', () => {
+    const source = readFileSync(new URL('./imageExtraction.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain('stage_change');
+    expect(source).not.toMatch(/(?:approve_change|commit_change)\s*\(/);
+  });
+
+  it.each([
+    ['1,234.56', '1234.56'],
+    ['1.234,56', '1234.56'],
+    ['10', '10.00'],
+    ['12.345', null],
+    ['1e3', null],
+    ['12.999', null],
+  ])('re-validates model money %s', (raw, expected) => expect(parseImageMoney(raw)).toBe(expected));
+
+  it('returns only typed review data and performs no staging call', async () => {
+    process.env['IMAGE_EXTRACTION_ENDPOINT'] = 'configured-vision-endpoint';
+    process.env['DATABRICKS_HOST'] = 'https://example.databricks.com';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ rows: [{ remittance_id: 'R1', invoice_id: 'I1', amount: '10.00' }], stated_total: '11.00' }) } }],
+        }),
+        { status: 200 }
+      )
+    );
+    const req = { header: (name: string) => (name === 'x-forwarded-access-token' ? 'obo-token' : undefined) } as Request;
+    const artifact = await extractImage(
+      req,
+      { raw: Buffer.from('image'), mimeType: 'image/png', parseId: '98e06e87-9d56-4e92-a530-4bd4ad5b1264', configVersion: 'v1', sha256: 'a'.repeat(64) },
+      fetchMock
+    );
+    expect(artifact).toMatchObject({ extraction_kind: 'probabilistic_image', requires_human_confirmation: true });
+    expect(artifact.rows[0]?.review.amount).toBe('human_review_required');
+    expect(artifact.warnings).toContain('IG_CROSS_FOOT_MISMATCH: The extracted rows do not add up to the stated total.');
+    expect(JSON.stringify(artifact)).not.toContain('OCR');
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('stage_change');
+  });
+});

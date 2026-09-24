@@ -319,6 +319,33 @@ const allowedTask = {
 };
 
 describe('ingest confirm route', () => {
+  it('rejects a probabilistic image artifact without an acknowledgement tied to its hash', async () => {
+    const artifact = JSON.stringify({
+      parse_id: PARSE_ID,
+      config_version: 'receivables-v1',
+      status: 'ready',
+      extraction_kind: 'probabilistic_image',
+      modality: 'image',
+      requires_human_confirmation: true,
+      artifact_hash: 'a'.repeat(64),
+      rows: [{ source_row: 2, values: { remittance_id: 'R-1', invoice_id: 'INV-1', amount: '10.00' } }],
+    });
+    const { handlers, req, userQuery } = confirmHarness(allowedTask, { artifact });
+    const { res, state } = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, res);
+    expect(state.status).toBe(409);
+    expect(userQuery.mock.calls.some(([sql]) => String(sql).includes('.stage_change('))).toBe(false);
+
+    req.body = {
+      parse_id: PARSE_ID,
+      selected_row_ids: [2],
+      human_review_acknowledgement: { parse_id: PARSE_ID, artifact_hash: 'a'.repeat(64), reviewed: true },
+    };
+    const accepted = response();
+    await handlers.get('POST /api/ingest/confirm')?.(req, accepted.res);
+    expect(accepted.state.status).toBe(201);
+  });
+
   it('rejects browser-supplied amounts or targets', async () => {
     const { handlers, req, userQuery } = confirmHarness(allowedTask);
     req.body = { parse_id: PARSE_ID, selected_row_ids: [2], amount: '999999', target_table: 'attacker_table' };

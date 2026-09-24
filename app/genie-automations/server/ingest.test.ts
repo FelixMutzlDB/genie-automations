@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   ingestGateFailure,
+  extractionKind,
   isAlreadyExists,
   parseRunStatus,
   safeExtension,
   sha256,
   uploadPath,
   validCsvBytes,
+  validImageBytes,
 } from './ingest';
 
 describe('ingest upload identity', () => {
@@ -17,10 +19,22 @@ describe('ingest upload identity', () => {
     expect(uploadPath('receivables-eu', digest, 'csv')).not.toContain('/Volumes/');
   });
 
-  it('allows only deterministic spreadsheet formats', () => {
+  it('accepts supported extensions while classifying images separately', () => {
     expect(safeExtension('report.CSV')).toBe('csv');
     expect(safeExtension('../../payload.js')).toBeNull();
     expect(safeExtension('macro.xlsm')).toBeNull();
+    expect(safeExtension('capture.PNG')).toBe('png');
+    expect(extractionKind('csv')).toBe('deterministic');
+    expect(extractionKind('jpeg')).toBe('probabilistic_image');
+  });
+
+  it('detects PNG and JPEG by magic bytes rather than extension alone', () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(8)]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]);
+    expect(validImageBytes(png, 'png')).toBe(true);
+    expect(validImageBytes(jpeg, 'jpg')).toBe(true);
+    expect(validImageBytes(Buffer.from('not an image'), 'png')).toBe(false);
+    expect(validImageBytes(png, 'jpg')).toBe(false);
   });
 
   it('rejects binary CSV content while allowing UTF-8 and cp1252 text', () => {

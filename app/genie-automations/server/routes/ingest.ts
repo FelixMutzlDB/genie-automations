@@ -5,12 +5,15 @@ import {
   MAX_UPLOAD_BYTES,
   newParseId,
   parseRunStatus,
+  extractionKind,
   safeExtension,
   sha256,
   uploadPath,
   validCsvBytes,
+  validImageBytes,
 } from '../ingest';
 import { activeConfigHash, ConfigResolutionError, resolveTaskConfig } from '../config/resolveTaskConfig';
+import { extractImage } from '../ingest/imageExtraction';
 
 const SCHEMA = 'genie_spike';
 const PARSER_VERSION = 'spike-02-v2';
@@ -52,6 +55,10 @@ const confirmSchema = z
   .object({
     parse_id: idSchema,
     selected_row_ids: z.array(z.number().int().positive()).min(1),
+    human_review_acknowledgement: z
+      .object({ parse_id: idSchema, artifact_hash: z.string().regex(/^[a-f0-9]{64}$/), reviewed: z.literal(true) })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -65,6 +72,10 @@ interface IngestArtifact {
   config_version: string;
   status: string;
   rows: CanonicalArtifactRow[];
+  extraction_kind?: 'deterministic' | 'probabilistic_image';
+  modality?: 'image';
+  requires_human_confirmation?: boolean;
+  artifact_hash?: string;
 }
 
 function isReceivablesTask(taskType: string): boolean {
@@ -99,6 +110,10 @@ function canonicalArtifact(raw: string, parseId: string, configVersion: string):
           })
           .passthrough()
       ),
+      extraction_kind: z.enum(['deterministic', 'probabilistic_image']).optional(),
+      modality: z.literal('image').optional(),
+      requires_human_confirmation: z.boolean().optional(),
+      artifact_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     })
     .passthrough()
     .parse(JSON.parse(raw));
@@ -158,13 +173,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           return friendlyFailure(res, 400, 'The file name is invalid.');
         }
         const extension = safeExtension(filename);
-        if (!extension) return friendlyFailure(res, 415, 'Choose a CSV or XLSX file.');
+        if (!extension) return friendlyFailure(res, 415, 'Choose a CSV, XLSX, PNG, or JPEG file.');
         if (!Buffer.isBuffer(req.body) || req.body.length === 0) return friendlyFailure(res, 400, 'The file is empty.');
         if (extension === 'xlsx' && !req.body.subarray(0, 4).equals(Buffer.from('504b0304', 'hex'))) {
           return friendlyFailure(res, 415, 'That file is not a valid XLSX workbook.');
         }
         if (extension === 'csv' && !validCsvBytes(req.body)) {
           return friendlyFailure(res, 415, 'That CSV contains binary or unsupported content.');
+        }
+        const kind = extractionKind(extension);
+        if (kind === 'probabilistic_image' && !validImageBytes(req.body, extension)) {
+          return friendlyFailure(res, 415, 'That file does not contain a valid PNG or JPEG image.');
         }
 
         const digest = sha256(req.body);
@@ -189,8 +208,21 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
              (parse_id, task_id, requested_by, volume_path, sha256, parser_version, config_version, status, artifact_ref)
            VALUES ($1,$2,$3,$4,$5,$6,$7,'UPLOADED',$8)
            ON CONFLICT (parse_id) DO NOTHING`,
-          [parseId, req.params.taskId, actor, relativePath, digest, PARSER_VERSION, configVersion, artifactPath]
+          [parseId, req.params.taskId, actor, relativePath, digest, kind === 'deterministic' ? PARSER_VERSION : 'vision-v1', configVersion, artifactPath]
         );
+
+        if (kind === 'probabilistic_image') {
+          const artifact = await extractImage(req, {
+            raw: req.body,
+            mimeType: extension === 'png' ? 'image/png' : 'image/jpeg',
+            parseId,
+            configVersion,
+            sha256: digest,
+          });
+          await userFiles.upload(artifactPath, Buffer.from(JSON.stringify(artifact)), { overwrite: false });
+          await db.query(`UPDATE ${SCHEMA}.ingest_run SET status='succeeded', updated_at=now() WHERE parse_id=$1`, [parseId]);
+          return res.status(202).json({ parse_id: parseId, run_id: 0, sha256: digest, extraction_kind: kind });
+        }
 
         const run = await appkit.jobs('default').runNow({
           args: [
@@ -229,13 +261,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
         const parseId = idSchema.parse(req.params.parseId);
         const db = appkit.lakebase;
         const record = await db.query(
-          `SELECT ir.run_id, ir.status FROM ${SCHEMA}.ingest_run ir
+          `SELECT ir.run_id, ir.status, ir.parser_version FROM ${SCHEMA}.ingest_run ir
              JOIN ${SCHEMA}.task_member tm ON tm.task_id=ir.task_id
             WHERE ir.parse_id=$1 AND tm.user_id=$2`,
           [parseId, actor]
         );
         const row = record.rows[0];
         if (!row) return friendlyFailure(res, 403, 'You cannot view this parse run.');
+        if (row['parser_version'] === 'vision-v1') {
+          const status = row['status'] === 'succeeded' ? 'succeeded' : row['status'] === 'failed' ? 'failed' : 'running';
+          return res.json({ parse_id: parseId, run_id: 0, status });
+        }
         const runId = Number(row['run_id']);
         const run = await appkit.jobs('default').getRun(runId);
         if (!run.ok || !run.data) throw new Error('parse status unavailable');
@@ -344,6 +380,17 @@ export function setupIngestRoutes(appkit: IngestAppKit): void {
           .asUser(req)
           .read(artifactRef, { maxSize: 10 * 1024 * 1024 });
         const artifact = canonicalArtifact(artifactRaw, body.parse_id, configVersion);
+        if (artifact.extraction_kind === 'probabilistic_image' || artifact.requires_human_confirmation) {
+          const acknowledgement = body.human_review_acknowledgement;
+          if (
+            !acknowledgement ||
+            acknowledgement.parse_id !== artifact.parse_id ||
+            acknowledgement.artifact_hash !== artifact.artifact_hash
+          ) {
+            await recordConfirmActivity(userDb, { taskId, actor, status: 'failure', reason: 'human_review_acknowledgement_required' });
+            return friendlyFailure(res, 409, 'Review every extracted image value and explicitly confirm this exact preview before staging.');
+          }
+        }
         const selectedIds = new Set(body.selected_row_ids);
         if (selectedIds.size !== body.selected_row_ids.length) throw new Error('duplicate selected row');
         const selected = artifact.rows.filter((row) => selectedIds.has(row.source_row));

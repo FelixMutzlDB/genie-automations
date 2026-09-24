@@ -26,10 +26,12 @@ interface IngestDialogProps {
   selectedRows: Set<number>;
   selectedTask: Task | null;
   confirmSubmitting: boolean;
+  humanReviewed: boolean;
   onOpen: () => void;
   onClose: () => void;
   onSelectedRowsChange: Dispatch<SetStateAction<Set<number>>>;
   onConfirm: () => void;
+  onHumanReviewedChange: (reviewed: boolean) => void;
 }
 
 export function IngestDialog({
@@ -39,10 +41,12 @@ export function IngestDialog({
   selectedRows,
   selectedTask,
   confirmSubmitting,
+  humanReviewed,
   onOpen,
   onClose,
   onSelectedRowsChange,
   onConfirm,
+  onHumanReviewedChange,
 }: IngestDialogProps) {
   const supportsStaging = INGEST_SUPPORTED_TASK_TYPES.includes(selectedTask?.task_type ?? '');
 
@@ -74,6 +78,13 @@ export function IngestDialog({
         {state.phase === 'preview' && preview && (
           <div className="space-y-4">
             <p className="text-xs text-muted-foreground break-all">SHA-256: {preview.sha256}</p>
+            {preview.extraction_kind === 'probabilistic_image' && (
+              <Alert>
+                <AlertDescription>
+                  This preview was read from an image by an AI model. It can be wrong. Check every identifier and amount against the image before staging.
+                </AlertDescription>
+              </Alert>
+            )}
             {preview.warnings.map((warning) => (
               <Alert key={warning}>
                 <AlertDescription>{warning}</AlertDescription>
@@ -147,6 +158,9 @@ export function IngestDialog({
                           {Object.keys(preview.rows[0]?.values ?? {}).map((column) => (
                             <td key={column} className="p-2">
                               {row.values[column] ?? '—'}
+                              {row.review?.[column] && (
+                                <span className="ml-2 text-xs text-amber-700">Needs your review</span>
+                              )}
                             </td>
                           ))}
                         </tr>
@@ -154,6 +168,16 @@ export function IngestDialog({
                     </tbody>
                   </table>
                 </div>
+                {preview.requires_human_confirmation && (
+                  <label className="flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={humanReviewed}
+                      onChange={(event) => onHumanReviewedChange(event.target.checked)}
+                    />
+                    <span>I reviewed these values against the image, including every amount and identifier.</span>
+                  </label>
+                )}
               </div>
             )}
           </div>
@@ -163,7 +187,14 @@ export function IngestDialog({
             Close
           </Button>
           {state.phase === 'preview' && supportsStaging && (
-            <Button disabled={selectedRows.size === 0 || confirmSubmitting} onClick={onConfirm}>
+            <Button
+              disabled={
+                selectedRows.size === 0 ||
+                confirmSubmitting ||
+                (Boolean(preview?.requires_human_confirmation) && !humanReviewed)
+              }
+              onClick={onConfirm}
+            >
               Confirm selected rows
             </Button>
           )}

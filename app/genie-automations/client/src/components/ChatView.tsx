@@ -115,7 +115,13 @@ export function ChatView({
         ))}
       </div>
       <div className="border-t p-3 flex gap-2">
-        <input ref={fileInputRef} className="hidden" type="file" accept=".csv,.xlsx" onChange={handleFileChange} />
+        <input
+          ref={fileInputRef}
+          className="hidden"
+          type="file"
+          accept=".csv,.xlsx,.png,.jpg,.jpeg,image/png,image/jpeg"
+          onChange={handleFileChange}
+        />
         <Button
           variant="outline"
           size="icon"
