@@ -48,6 +48,9 @@ variables:
     default: '0 15 8 * * ?'
   genie_space_id:
     description: Existing curated receivables Genie Space ID. Supply this bundle variable at deploy time.
+  coworker_fm_endpoint:
+    description: Existing Model Serving endpoint used by the reconciliation co-worker.
+    default: databricks-claude-sonnet-4-6
 
 resources:
   apps:
@@ -87,6 +90,10 @@ resources:
         - name: image-extraction-endpoint
           serving_endpoint:
             name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
+        - name: coworker-fm-endpoint
+          serving_endpoint:
+            name: ${var.coworker_fm_endpoint}
             permission: CAN_QUERY
         - name: config-admin-principals
           secret:
@@ -158,10 +165,11 @@ resources:
       description: Evaluates chase reminders into a pending outbox; the transport is intentionally no-op.
       run_as:
         service_principal_name: ${var.chase_scheduler_sp}
+      # Enabled after provisioning and end-to-end verification on 2026-09-25.
       schedule:
         quartz_cron_expression: ${var.chase_scheduler_cron}
         timezone_id: UTC
-        pause_status: PAUSED
+        pause_status: UNPAUSED
       tasks:
         - task_key: evaluate_chase_reminders
           spark_python_task:
@@ -185,10 +193,11 @@ resources:
       description: Snapshots approved eligible reminders for the native email digest and marks them announced.
       run_as:
         service_principal_name: ${var.chase_alert_run_as_sp}
+      # Enabled after provisioning and end-to-end verification on 2026-09-25.
       schedule:
         quartz_cron_expression: '0 0 8 * * ?'
         timezone_id: UTC
-        pause_status: PAUSED
+        pause_status: UNPAUSED
       tasks:
         - task_key: publish_approved_chase_snapshot
           spark_python_task:
@@ -252,10 +261,11 @@ resources:
           retrigger_seconds: 0
           subscriptions:
             - destination_id: ${var.chase_notification_destination_id}
+      # Enabled after provisioning and end-to-end verification on 2026-09-25.
       schedule:
         quartz_cron_schedule: ${var.chase_alert_cron}
         timezone_id: UTC
-        pause_status: PAUSED
+        pause_status: UNPAUSED
 
 targets:
   default:
