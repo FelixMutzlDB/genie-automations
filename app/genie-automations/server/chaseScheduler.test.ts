@@ -28,14 +28,13 @@ describe('scheduled chase evaluation', () => {
     expect(migration).not.toMatch(/GRANT (?:SELECT|INSERT|UPDATE|DELETE).*TO :"scheduler_role"/);
   });
 
-  it('deploys the scheduler paused without changing the unpaused projection schedule', () => {
+  it('deploys the verified scheduler and projection schedules unpaused', () => {
     expect(bundle).toContain('quartz_cron_expression: ${var.chase_scheduler_cron}');
     expect(bundle).toContain('service_principal_name: ${var.chase_scheduler_sp}');
     const projection = bundle.split('publish_receivables_projection:', 2)[1]?.split('chase_scheduler:', 1)[0] ?? '';
     const chase = bundle.split('chase_scheduler:', 2)[1]?.split('targets:', 1)[0] ?? '';
     expect(projection).toContain("quartz_cron_expression: '0 0/5 * * * ?'");
     expect(projection).toContain('pause_status: UNPAUSED');
-    expect(chase).toContain('pause_status: PAUSED');
-    expect(chase).not.toContain('pause_status: UNPAUSED');
+    expect(chase).toContain('pause_status: UNPAUSED');
   });
 });

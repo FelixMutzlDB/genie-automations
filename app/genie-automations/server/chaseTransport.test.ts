@@ -59,15 +59,15 @@ describe('approved chase transport', () => {
     expect(body).toContain('lower(owner_member.user_id)=lower(t.owner_id)');
   });
 
-  it('deploys scheduler, projection, and alert paused while receivables remains unpaused', () => {
+  it('deploys all verified scheduled resources unpaused', () => {
     const receivables = bundle.split('publish_receivables_projection:', 2)[1]?.split('chase_scheduler:', 1)[0] ?? '';
     const scheduler = bundle.split('chase_scheduler:', 2)[1]?.split('publish_approved_chase_reminders:', 1)[0] ?? '';
     const projection = bundle.split('publish_approved_chase_reminders:', 2)[1]?.split('alerts:', 1)[0] ?? '';
     const alert = bundle.split('approved_chase_digest:', 2)[1]?.split('targets:', 1)[0] ?? '';
     expect(receivables).toContain('pause_status: UNPAUSED');
-    expect(scheduler).toContain('pause_status: PAUSED');
-    expect(projection).toContain('pause_status: PAUSED');
-    expect(alert).toContain('pause_status: PAUSED');
+    expect(scheduler).toContain('pause_status: UNPAUSED');
+    expect(projection).toContain('pause_status: UNPAUSED');
+    expect(alert).toContain('pause_status: UNPAUSED');
     expect(alert).toContain('{{QUERY_RESULT_TABLE}}');
     expect(alert).toContain('overflow_count');
   });
