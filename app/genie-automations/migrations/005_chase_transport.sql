@@ -158,6 +158,7 @@ COMMENT ON COLUMN genie_spike.chase_delivery.announced_at IS
 
 REVOKE ALL ON genie_spike.chase_batch,genie_spike.chase_delivery FROM PUBLIC, :"obo_role", :"scheduler_role", :"publisher_role";
 GRANT SELECT,INSERT,UPDATE,DELETE ON genie_spike.chase_batch,genie_spike.chase_delivery TO :"admin_role";
+GRANT USAGE ON SCHEMA genie_spike TO :"publisher_role";
 REVOKE ALL ON FUNCTION genie_spike.get_pending_chase_batches(),
   genie_spike.approve_chase_batch(UUID,TEXT),genie_spike.archive_chase_batch(UUID,TEXT),
   genie_spike.get_approved_chase_reminders(TEXT) FROM PUBLIC;

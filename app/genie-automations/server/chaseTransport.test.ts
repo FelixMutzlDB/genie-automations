@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const migration = readFileSync(new URL('../migrations/005_chase_transport.sql', import.meta.url), 'utf8');
 const bundle = readFileSync(new URL('../databricks.yml', import.meta.url), 'utf8');
 const publisher = readFileSync(new URL('../projection/publish_chase.py', import.meta.url), 'utf8');
+const projectionView = readFileSync(new URL('../projection/sql/create_chase_projection.sql', import.meta.url), 'utf8');
 
 function functionBody(name: string): string {
   return migration.match(new RegExp(`FUNCTION genie_spike\\.${name}[^]*?AS \\$\\$([^]*?)\\$\\$;`))?.[1] ?? '';
@@ -27,6 +28,28 @@ describe('approved chase transport', () => {
     expect(migration).toContain('GRANT EXECUTE ON FUNCTION genie_spike.get_approved_chase_reminders(TEXT) TO :"publisher_role"');
     expect(migration).toContain('REVOKE ALL ON genie_spike.chase_batch,genie_spike.chase_delivery');
     expect(migration).not.toMatch(/GRANT (?:SELECT|INSERT|UPDATE|DELETE)[^;]*TO :"publisher_role"/);
+    expect(migration).toContain('GRANT USAGE ON SCHEMA genie_spike TO :"publisher_role"');
+  });
+
+  it('exposes exactly the eight approved reminder contract columns', () => {
+    const selected = projectionView
+      .split('\nSELECT\n', 2)[1]
+      ?.split('\nFROM ', 1)[0]
+      ?.split(',')
+      .map((column) => column.trim());
+    expect(selected).toEqual([
+      'task_id',
+      'task_name',
+      'owner_email',
+      'item_reference',
+      'due_at',
+      'offset_kind',
+      'offset_days',
+      'approved_at',
+    ]);
+    const alertQuery = bundle.split('approved_chase_digest:', 2)[1]?.split('evaluation:', 1)[0] ?? '';
+    expect(alertQuery).not.toContain('announcement_window');
+    expect(alertQuery).not.toContain('projection_as_of');
   });
 
   it('derives recipient identity from the task owner and validated owner membership', () => {

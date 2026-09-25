@@ -12,6 +12,8 @@ const roles = {
   outsider: `chase_it_${suffix}_outsider`,
   admin: `chase_it_${suffix}_admin`,
   obo: `chase_it_${suffix}_obo`,
+  scheduler: `chase_it_${suffix}_scheduler`,
+  publisher: `chase_it_${suffix}_publisher`,
 };
 
 function identifier(value: string): string {
@@ -39,7 +41,11 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
     );
     await client.query(`CREATE SCHEMA genie_spike`);
     await client.query(`
-      CREATE TABLE genie_spike.task(task_id TEXT PRIMARY KEY);
+      CREATE TABLE genie_spike.task(
+        task_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_id TEXT NOT NULL
+      );
       CREATE TABLE genie_spike.task_member(
         task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
         user_id TEXT NOT NULL,
@@ -59,7 +65,9 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
         dest_table TEXT NOT NULL,
         PRIMARY KEY(dest_catalog,dest_schema,dest_table)
       );
-      INSERT INTO genie_spike.task(task_id) VALUES('task-a'),('task-b');
+      INSERT INTO genie_spike.task(task_id,name,owner_id) VALUES
+        ('task-a','Task A','${roles.owner}'),
+        ('task-b','Task B','${roles.outsider}');
       INSERT INTO genie_spike.task_member(task_id,user_id,role) VALUES
         ('task-a','${roles.owner}','owner'),
         ('task-a','${roles.member}','member');
@@ -73,6 +81,45 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
     await client.query(migration);
     // Migration 002 grants these in deployed environments; reproduce that prerequisite here.
     await client.query(`GRANT USAGE ON SCHEMA genie_spike TO ${identifier(roles.obo)}, ${identifier(roles.admin)}`);
+    await client.query(`
+      CREATE TABLE genie_spike.chase_batch(
+        batch_id UUID PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
+        evaluated_at TIMESTAMPTZ NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CONSTRAINT chase_batch_status_check CHECK(status IN ('pending')),
+        transport_adapter TEXT NOT NULL DEFAULT 'noop'
+          CONSTRAINT chase_batch_transport_adapter_check CHECK(transport_adapter='noop'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE genie_spike.chase_delivery(
+        delivery_id UUID PRIMARY KEY,
+        batch_id UUID NOT NULL REFERENCES genie_spike.chase_batch(batch_id),
+        task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
+        item_reference TEXT NOT NULL,
+        due_at TIMESTAMPTZ NOT NULL,
+        offset_kind TEXT NOT NULL CHECK(offset_kind IN ('approach','post_due')),
+        offset_days INTEGER NOT NULL CHECK(offset_days>0),
+        checkpoint_at TIMESTAMPTZ NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CONSTRAINT chase_delivery_status_check CHECK(status IN ('pending')),
+        transport_adapter TEXT NOT NULL DEFAULT 'noop'
+          CONSTRAINT chase_delivery_transport_adapter_check CHECK(transport_adapter='noop'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE(task_id,item_reference,due_at,offset_kind,offset_days)
+      );
+    `);
+    const transportMigration = readFileSync(
+      new URL('../../migrations/005_chase_transport.sql', import.meta.url),
+      'utf8'
+    )
+      .split(':"admin_role"')
+      .join(identifier(roles.admin))
+      .split(':"obo_role"')
+      .join(identifier(roles.obo))
+      .split(':"scheduler_role"')
+      .join(identifier(roles.scheduler))
+      .split(':"publisher_role"')
+      .join(identifier(roles.publisher));
+    await client.query(transportMigration);
   }, 30_000);
 
   afterAll(async () => {
@@ -167,6 +214,55 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
       `SELECT state FROM genie_spike.chase_item_status WHERE task_id='task-a'`
     );
     expect(resolved.rows[0]?.state).toBe('resolved');
+  });
+
+  it('denies member and outsider batch approval without changing outbox state, then allows the owner', async () => {
+    const batchId = '11111111-1111-4111-8111-111111111111';
+    const deliveryId = '22222222-2222-4222-8222-222222222222';
+    await client.query(
+      `INSERT INTO genie_spike.chase_batch(batch_id,task_id,evaluated_at)
+       VALUES($1,'task-a',now())`,
+      [batchId]
+    );
+    await client.query(
+      `INSERT INTO genie_spike.chase_delivery(
+         delivery_id,batch_id,task_id,item_reference,due_at,offset_kind,offset_days,checkpoint_at)
+       VALUES($1,$2,'task-a','REM-APPROVAL',now() + interval '2 days','approach',2,now())`,
+      [deliveryId, batchId]
+    );
+
+    for (const deniedRole of [roles.member, roles.outsider]) {
+      await asPrincipal(deniedRole, async () => {
+        await expect42501(`SELECT * FROM genie_spike.approve_chase_batch($1::uuid,'denied')`, [batchId]);
+      });
+      const deniedState = await client.query<{ batch_status: string; delivery_status: string }>(
+        `SELECT b.status AS batch_status,d.status AS delivery_status
+           FROM genie_spike.chase_batch b JOIN genie_spike.chase_delivery d USING(batch_id)
+          WHERE b.batch_id=$1`,
+        [batchId]
+      );
+      expect(deniedState.rows[0]).toEqual({ batch_status: 'pending', delivery_status: 'pending' });
+    }
+
+    await asPrincipal(roles.owner, async () => {
+      const approved = await client.query(
+        `SELECT * FROM genie_spike.approve_chase_batch($1::uuid,'owner approved')`,
+        [batchId]
+      );
+      expect(approved.rows[0]).toMatchObject({
+        old_status: 'pending',
+        new_status: 'approved',
+        item_count: '1',
+        actor: roles.owner,
+      });
+    });
+    const approvedState = await client.query<{ batch_status: string; delivery_status: string }>(
+      `SELECT b.status AS batch_status,d.status AS delivery_status
+         FROM genie_spike.chase_batch b JOIN genie_spike.chase_delivery d USING(batch_id)
+        WHERE b.batch_id=$1`,
+      [batchId]
+    );
+    expect(approvedState.rows[0]).toEqual({ batch_status: 'approved', delivery_status: 'eligible' });
   });
 });
 

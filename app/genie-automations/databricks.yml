@@ -237,7 +237,6 @@ resources:
           count(*) OVER () AS reminder_count,
           greatest(count(*) OVER () - 100, 0) AS overflow_count
         FROM `felix_demo_catalog`.`genie-automations`.`approved_chase_reminders`
-        WHERE announcement_window = CAST(current_date() AS STRING)
         ORDER BY due_at
       evaluation:
         comparison_operator: GREATER_THAN
