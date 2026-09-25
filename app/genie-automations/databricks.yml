@@ -48,6 +48,9 @@ variables:
     default: '0 15 8 * * ?'
   genie_space_id:
     description: Existing curated receivables Genie Space ID. Supply this bundle variable at deploy time.
+  coworker_fm_endpoint:
+    description: Existing Model Serving endpoint used by the reconciliation co-worker.
+    default: databricks-claude-sonnet-4-6
 
 resources:
   apps:
@@ -87,6 +90,10 @@ resources:
         - name: image-extraction-endpoint
           serving_endpoint:
             name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
+        - name: coworker-fm-endpoint
+          serving_endpoint:
+            name: ${var.coworker_fm_endpoint}
             permission: CAN_QUERY
         - name: config-admin-principals
           secret:

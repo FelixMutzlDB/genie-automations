@@ -13,8 +13,15 @@ import { Application, Request, Response } from 'express';
 import { activeConfigHash, resolveTaskConfig } from '../config/resolveTaskConfig';
 
 const SCHEMA = 'genie_spike';
-const MODEL = 'databricks-claude-sonnet-4-6';
-const HOST = (process.env.DATABRICKS_HOST || 'https://fevm-felix-demo.cloud.databricks.com').replace(/\/$/, '');
+const DEFAULT_MODEL = 'databricks-claude-sonnet-4-6';
+const DEFAULT_HOST = 'fevm-felix-demo.cloud.databricks.com';
+
+export function coworkerInvocationsUrl(): string {
+  const rawHost = process.env['DATABRICKS_HOST'] || DEFAULT_HOST;
+  const host = `${/^https?:\/\//.test(rawHost) ? '' : 'https://'}${rawHost}`.replace(/\/$/, '');
+  const model = process.env['COWORKER_FM_ENDPOINT'] || DEFAULT_MODEL;
+  return `${host}/serving-endpoints/${model}/invocations`;
+}
 
 interface QueryResult {
   rows: Record<string, unknown>[];
@@ -334,7 +341,7 @@ When the user asks to correct or change something, extract the typed fields and 
 
 async function callFm(req: Request, messages: unknown[]): Promise<Record<string, unknown>> {
   const token = req.header('x-forwarded-access-token');
-  const resp = await fetch(`${HOST}/serving-endpoints/${MODEL}/invocations`, {
+  const resp = await fetch(coworkerInvocationsUrl(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
     body: JSON.stringify({ messages, tools: TOOLS, tool_choice: 'auto', max_tokens: 1024 }),
