@@ -103,6 +103,28 @@ describe('chase routes', () => {
     expect(state.status).toBe(200);
   });
 
+  it('humanizes the shared receivables ledger owner conflict without exposing database details', async () => {
+    const conflict = Object.assign(
+      new Error('shared receivables ledger already has an enabled chase schedule'),
+      { code: '42501', detail: '{"internal":"must not leak"}' }
+    );
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ role: 'owner', task_type: 'receivables' }] })
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce({ rows: [] });
+    const handlers = harness(query);
+    const { res, state } = response();
+
+    await handlers.get('PUT /api/tasks/:id/reminders/config')?.(request('PUT', validConfig), res);
+
+    expect(state.status).toBe(409);
+    expect(state.body).toEqual({
+      error: 'Reminders are already enabled for another automation using this shared receivables ledger.',
+    });
+    expect(JSON.stringify(state.body)).not.toContain('internal');
+  });
+
   it('dry-run returns approaching and overdue items and writes nothing', async () => {
     const query = vi
       .fn()
@@ -125,20 +147,20 @@ describe('chase routes', () => {
     for (const [sql] of query.mock.calls) expect(String(sql)).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|CALL)\b/i);
   });
 
-  it('scopes evaluation to the requested task when the user owns two tasks', async () => {
+  it('evaluates the shared receivables ledger for its single schedule owner', async () => {
     const query = vi.fn((sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> => {
+      void sql;
+      void params;
       const call = query.mock.calls.length;
       if (call === 1) return Promise.resolve({ rows: [{ role: 'owner', task_type: 'receivables' }] });
-      if (call === 2) return Promise.resolve({ rows: [{ ...validConfig }] });
-      if (call === 3) {
-        const correctlyScoped = sql.includes('WHERE r.task_id=$1') && params?.[0] === 'receivables-eu';
+      if (call === 2) return Promise.resolve({ rows: [{ active: true }] });
+      if (call === 3) return Promise.resolve({ rows: [{ ...validConfig }] });
+      if (call === 4) {
         return Promise.resolve({
-          rows: correctlyScoped
-            ? [{ item_reference: 'TASK-A-REM', accounting_period: '2026-09', remaining_amount: '10.00' }]
-            : [
-                { item_reference: 'TASK-A-REM', accounting_period: '2026-09', remaining_amount: '10.00' },
-                { item_reference: 'TASK-B-REM', accounting_period: '2026-09', remaining_amount: '20.00' },
-              ],
+          rows: [
+            { item_reference: 'SHARED-REM-1', accounting_period: '2026-09', remaining_amount: '10.00' },
+            { item_reference: 'SHARED-REM-2', accounting_period: '2026-09', remaining_amount: '20.00' },
+          ],
         });
       }
       return Promise.resolve({ rows: [] });
@@ -147,20 +169,38 @@ describe('chase routes', () => {
     const { res, state } = response();
     await handlers.get('POST /api/tasks/:id/reminders/evaluate')?.(request('POST'), res);
 
-    expect(state.body).toEqual({ item_count: 1 });
-    expect(String(query.mock.calls[2]?.[0])).toContain('WHERE r.task_id=$1');
-    expect(query.mock.calls[2]?.[1]).toEqual(['receivables-eu']);
+    expect(state.body).toEqual({ item_count: 2 });
+    expect(String(query.mock.calls[3]?.[0])).toContain(`FROM genie_spike.remittance r`);
+    expect(String(query.mock.calls[3]?.[0])).not.toContain('r.task_id');
+    expect(query.mock.calls[3]?.[1]).toEqual([]);
     const savedReferences = query.mock.calls
       .filter(([sql]) => String(sql).includes('save_chase_item_status'))
       .map(([, params]) => params?.[1]);
-    expect(savedReferences).toEqual(['TASK-A-REM']);
-    expect(savedReferences).not.toContain('TASK-B-REM');
+    expect(savedReferences).toEqual(['SHARED-REM-1', 'SHARED-REM-2']);
+  });
+
+  it('does not evaluate without an active receivables destination binding', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ role: 'owner', task_type: 'reconciliation' }] })
+      .mockResolvedValueOnce({ rows: [{ active: false }] });
+    const handlers = harness(query);
+    const { res, state } = response();
+
+    await handlers.get('POST /api/tasks/:id/reminders/evaluate')?.(request('POST'), res);
+
+    expect(state.status).toBe(400);
+    expect(state.body).toEqual({
+      error: 'This automation needs an active receivables destination before reminders can refresh.',
+    });
+    expect(query).toHaveBeenCalledTimes(2);
   });
 
   it('transitions missing outstanding items to resolved for only the requested task', async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({ rows: [{ role: 'owner', task_type: 'receivables' }] })
+      .mockResolvedValueOnce({ rows: [{ active: true }] })
       .mockResolvedValueOnce({ rows: [{ ...validConfig }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ resolved_count: 1 }] })
@@ -170,8 +210,8 @@ describe('chase routes', () => {
     await handlers.get('POST /api/tasks/:id/reminders/evaluate')?.(request('POST'), res);
 
     expect(state.body).toEqual({ item_count: 0 });
-    expect(String(query.mock.calls[3]?.[0])).toContain('resolve_missing_chase_items');
-    expect(query.mock.calls[3]?.[1]).toEqual(['receivables-eu', []]);
+    expect(String(query.mock.calls[4]?.[0])).toContain('resolve_missing_chase_items');
+    expect(query.mock.calls[4]?.[1]).toEqual(['receivables-eu', []]);
   });
 
   it('contains no money-mutation capability', () => {
@@ -207,6 +247,7 @@ describe('chase routes', () => {
 
 describe('chase migration', () => {
   const migration = readFileSync(new URL('../../migrations/003_chase_reminders.sql', import.meta.url), 'utf8');
+  const schedulerMigration = readFileSync(new URL('../../migrations/004_chase_scheduler.sql', import.meta.url), 'utf8');
   const functionBody = (name: string): string =>
     migration.match(new RegExp(`FUNCTION genie_spike\\.${name}[^]*?AS \\$\\$([^]*?)\\$\\$;`))?.[1] ?? '';
 
@@ -221,6 +262,19 @@ describe('chase migration', () => {
   it('does not alter the guarded money mutation core', () => {
     expect(migration).not.toMatch(/stage_change|proposed_changes|approve_change|commit_change|guarded/i);
     expect(migration).not.toMatch(/\bALTER\s+(?:TABLE|FUNCTION)\s+genie_spike\.(?:remittance|allocation)/i);
+    expect(schedulerMigration).not.toMatch(/\bALTER\s+(?:TABLE|FUNCTION)\s+genie_spike\.(?:remittance|allocation)/i);
+  });
+
+  it('models receivables as one shared ledger with one enabled schedule owner', () => {
+    expect(schedulerMigration).not.toContain('r.task_id');
+    expect(schedulerMigration).toContain("t.task_type IN ('receivables','allocation_upsert','reconciliation')");
+    expect(schedulerMigration).toContain("b.dest_table IN ('allocation','remittance')");
+    expect(schedulerMigration).toContain('pg_advisory_xact_lock');
+    expect(schedulerMigration).toContain('c.task_id<>requested.task_id');
+    expect(schedulerMigration).toContain('b.dest_catalog=requested.dest_catalog');
+    expect(schedulerMigration).toContain(
+      "RAISE EXCEPTION 'shared receivables ledger already has an enabled chase schedule' USING ERRCODE='42501'"
+    );
   });
 
   it('uses OBO-callable security-definer chase functions for configured admins without broad write grants', () => {

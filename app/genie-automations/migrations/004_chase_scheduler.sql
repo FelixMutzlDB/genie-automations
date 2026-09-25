@@ -30,6 +30,84 @@ CREATE TABLE IF NOT EXISTS genie_spike.chase_delivery (
 CREATE INDEX IF NOT EXISTS chase_delivery_pending_idx
   ON genie_spike.chase_delivery(status,created_at);
 
+-- Receivables are one shared ledger. Serialize ownership changes so concurrent
+-- requests cannot enable two schedules over the same allocation/remittance data.
+CREATE OR REPLACE FUNCTION genie_spike.save_task_schedule_config(
+  p_task_id TEXT,
+  p_enabled BOOLEAN,
+  p_cadence TEXT,
+  p_due_offset_days INTEGER,
+  p_default_due_at TIMESTAMPTZ,
+  p_approach_offsets INTEGER[],
+  p_post_due_offsets INTEGER[],
+  p_quiet_hours_start TIME,
+  p_quiet_hours_end TIME,
+  p_timezone TEXT
+) RETURNS SETOF genie_spike.task_schedule_config
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,genie_spike AS $$
+BEGIN
+  PERFORM genie_spike.assert_chase_access(p_task_id,true);
+
+  IF p_enabled THEN
+    PERFORM pg_advisory_xact_lock(hashtext('genie_spike.shared_receivables_chase_owner'));
+
+    IF NOT EXISTS(
+      SELECT 1
+        FROM genie_spike.task t
+        JOIN genie_spike.destination_binding b ON b.task_id=t.task_id
+       WHERE t.task_id=p_task_id
+         AND t.status='active'
+         AND t.task_type IN ('receivables','allocation_upsert','reconciliation')
+         AND b.status='active'
+         AND b.dest_schema='genie_spike'
+         AND b.dest_table IN ('allocation','remittance')
+         AND b.write_scope->'change_types'='["allocation_upsert"]'::jsonb
+    ) THEN
+      RAISE EXCEPTION 'active receivables destination binding required' USING ERRCODE='42501';
+    END IF;
+
+    IF EXISTS(
+      SELECT 1
+        FROM genie_spike.destination_binding requested
+        JOIN genie_spike.task_schedule_config c ON c.task_id<>requested.task_id
+        JOIN genie_spike.destination_binding b ON b.task_id=c.task_id
+          AND b.dest_catalog=requested.dest_catalog
+          AND b.dest_schema=requested.dest_schema
+       WHERE requested.task_id=p_task_id
+         AND requested.status='active'
+         AND requested.dest_schema='genie_spike'
+         AND requested.dest_table IN ('allocation','remittance')
+         AND requested.write_scope->'change_types'='["allocation_upsert"]'::jsonb
+         AND c.enabled
+         AND b.status='active'
+         AND b.dest_table IN ('allocation','remittance')
+         AND b.write_scope->'change_types'='["allocation_upsert"]'::jsonb
+    ) THEN
+      RAISE EXCEPTION 'shared receivables ledger already has an enabled chase schedule' USING ERRCODE='42501';
+    END IF;
+  END IF;
+
+  RETURN QUERY WITH saved AS (
+    INSERT INTO genie_spike.task_schedule_config(
+      task_id,enabled,cadence,due_offset_days,default_due_at,approach_offsets,post_due_offsets,
+      quiet_hours_start,quiet_hours_end,timezone,updated_by,updated_at)
+    VALUES(p_task_id,p_enabled,p_cadence,p_due_offset_days,p_default_due_at,p_approach_offsets,p_post_due_offsets,
+      p_quiet_hours_start,p_quiet_hours_end,p_timezone,session_user,now())
+    ON CONFLICT(task_id) DO UPDATE SET enabled=EXCLUDED.enabled,cadence=EXCLUDED.cadence,
+      due_offset_days=EXCLUDED.due_offset_days,default_due_at=EXCLUDED.default_due_at,
+      approach_offsets=EXCLUDED.approach_offsets,post_due_offsets=EXCLUDED.post_due_offsets,
+      quiet_hours_start=EXCLUDED.quiet_hours_start,quiet_hours_end=EXCLUDED.quiet_hours_end,
+      timezone=EXCLUDED.timezone,updated_by=session_user,updated_at=now()
+    RETURNING *
+  ), activity AS (
+    INSERT INTO genie_spike.task_activity(task_id,user_id,action,status,detail)
+    SELECT task_id,session_user,'chase_schedule_saved','success',
+      jsonb_build_object('enabled',enabled,'cadence',cadence) FROM saved
+  )
+  SELECT * FROM saved;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION genie_spike.get_chase_scheduler_tasks()
 RETURNS SETOF genie_spike.task_schedule_config
 LANGUAGE sql SECURITY DEFINER STABLE SET search_path=pg_catalog,genie_spike AS $$
@@ -43,8 +121,20 @@ RETURNS TABLE(item_reference TEXT,accounting_period TEXT,outstanding_amount NUME
 LANGUAGE sql SECURITY DEFINER STABLE SET search_path=pg_catalog,genie_spike AS $$
   SELECT r.remittance_id,r.period,r.total_amount-COALESCE(SUM(a.amount),0)
   FROM genie_spike.remittance r LEFT JOIN genie_spike.allocation a USING(remittance_id)
-  WHERE r.task_id=p_task_id
-    AND EXISTS(SELECT 1 FROM genie_spike.task_schedule_config c WHERE c.task_id=p_task_id AND c.enabled)
+  WHERE EXISTS(
+    SELECT 1
+      FROM genie_spike.task t
+      JOIN genie_spike.task_schedule_config c ON c.task_id=t.task_id
+      JOIN genie_spike.destination_binding b ON b.task_id=t.task_id
+     WHERE t.task_id=p_task_id
+       AND t.status='active'
+       AND t.task_type IN ('receivables','allocation_upsert','reconciliation')
+       AND c.enabled
+       AND b.status='active'
+       AND b.dest_schema='genie_spike'
+       AND b.dest_table IN ('allocation','remittance')
+       AND b.write_scope->'change_types'='["allocation_upsert"]'::jsonb
+  )
   GROUP BY r.remittance_id,r.period,r.total_amount
   HAVING r.total_amount-COALESCE(SUM(a.amount),0)>0
   ORDER BY r.remittance_id
