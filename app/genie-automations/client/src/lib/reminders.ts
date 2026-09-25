@@ -1,8 +1,9 @@
-import type { ReminderConfig, ReminderPreview } from '../types';
+import type { ChaseApprovalBatch, ReminderConfig, ReminderPreview } from '../types';
 
 export const REMINDER_LOAD_ERROR = "We couldn't load reminders right now. Try again.";
 export const REMINDER_SAVE_ERROR = "We couldn't save that reminder schedule. Nothing was changed.";
 export const REMINDER_REFRESH_ERROR = "We couldn't refresh the reminder preview. Nothing was sent.";
+export const REMINDER_APPROVAL_ERROR = "We couldn't save that reminder decision. Nothing was changed.";
 
 async function request<T>(
   path: string,
@@ -51,4 +52,26 @@ export function evaluateReminders(taskId: string, fetcher?: typeof fetch): Promi
 
 export function loadReminderPreview(taskId: string, fetcher?: typeof fetch): Promise<ReminderPreview> {
   return request(`/api/tasks/${encodeURIComponent(taskId)}/reminders/preview`, REMINDER_LOAD_ERROR, undefined, fetcher);
+}
+
+export function loadChaseApprovalQueue(fetcher?: typeof fetch): Promise<{ batches: ChaseApprovalBatch[] }> {
+  return request('/api/reminders/approval-queue', REMINDER_LOAD_ERROR, undefined, fetcher);
+}
+
+export function reviewChaseBatch(
+  batchId: string,
+  action: 'approve' | 'archive',
+  note = '',
+  fetcher?: typeof fetch
+): Promise<{ message: string }> {
+  return request(
+    `/api/reminders/batches/${encodeURIComponent(batchId)}/action`,
+    REMINDER_APPROVAL_ERROR,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, note, confirmed: true }),
+    },
+    fetcher
+  );
 }

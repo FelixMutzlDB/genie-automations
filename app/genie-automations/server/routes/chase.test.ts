@@ -9,7 +9,7 @@ function request(method: string, body: unknown = {}, role = 'owner'): Request {
   const req: Partial<Request> = {
     method,
     body,
-    params: { id: 'receivables-eu' },
+    params: { id: 'receivables-eu', batchId: '11111111-1111-1111-1111-111111111111' },
     header: ((name: string) => (name === 'x-forwarded-email' ? `${role}@example.com` : undefined)) as Request['header'],
   };
   return req as Request;
@@ -178,6 +178,30 @@ describe('chase routes', () => {
     const source = readFileSync(new URL('./chase.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/stage_change|proposed_changes|approve_change|commit_change|guarded/i);
     expect(source).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+)?genie_spike\.(?:remittance|allocation)\b/i);
+  });
+
+  it('approves only after the server verifies the batch and owner role', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          batch_id: '11111111-1111-1111-1111-111111111111',
+          task_id: 'receivables-eu',
+          reviewer_role: 'owner',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ old_status: 'pending', new_status: 'approved', item_count: 2, actor: 'owner@example.com' }],
+      });
+    const handlers = harness(query);
+    const { res, state } = response();
+    await handlers.get('POST /api/reminders/batches/:batchId/action')?.(
+      request('POST', { action: 'approve', note: '', confirmed: true }),
+      res
+    );
+    expect(state.status).toBe(200);
+    expect(state.body).toMatchObject({ message: '2 reminders approved for the next internal digest.' });
+    expect(String(query.mock.calls[1]?.[0])).toContain('approve_chase_batch');
   });
 });
 

@@ -96,6 +96,18 @@ export interface ReminderPreview {
   items: ReminderPreviewItem[];
 }
 
+export interface ChaseApprovalBatch {
+  batch_id: string;
+  task_id: string;
+  task_name: string;
+  owner_email: string;
+  evaluated_at: string;
+  item_count: number;
+  offset_kinds: string[];
+  due_dates: string[];
+  item_preview: string[];
+}
+
 export interface ParsePreview {
   parse_id: string;
   sha256: string;

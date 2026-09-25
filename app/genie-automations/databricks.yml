@@ -36,6 +36,16 @@ variables:
   chase_scheduler_cron:
     description: Quartz cron expression for chase evaluation.
     default: '0 0 * * * ?'
+  chase_notification_destination_id:
+    description: Existing Databricks EMAIL notification destination ID for approved chase digests.
+  chase_alert_warehouse_id:
+    description: SQL warehouse used by the approved chase reminder alert.
+    default: f7cdb11888c4799e
+  chase_alert_run_as_sp:
+    description: Dedicated service principal application ID used by both the chase projection and alert.
+  chase_alert_cron:
+    description: Daily UTC SQL Alert evaluation schedule; keep it after the projection schedule.
+    default: '0 15 8 * * ?'
   genie_space_id:
     description: Existing curated receivables Genie Space ID. Supply this bundle variable at deploy time.
 
@@ -169,6 +179,83 @@ resources:
             dependencies:
               - databricks-sdk==0.81.0
               - psycopg[binary]==3.2.10
+
+    publish_approved_chase_reminders:
+      name: '[${bundle.target}] genie-automations-publish-approved-chase-reminders'
+      description: Snapshots approved eligible reminders for the native email digest and marks them announced.
+      run_as:
+        service_principal_name: ${var.chase_alert_run_as_sp}
+      schedule:
+        quartz_cron_expression: '0 0 8 * * ?'
+        timezone_id: UTC
+        pause_status: PAUSED
+      tasks:
+        - task_key: publish_approved_chase_snapshot
+          spark_python_task:
+            python_file: ./projection/publish_chase.py
+            parameters:
+              - --endpoint
+              - ${var.projection_postgres_endpoint}
+              - --database
+              - ${var.projection_postgres_database_name}
+          environment_key: chase_projection
+        - task_key: create_approved_chase_view
+          depends_on:
+            - task_key: publish_approved_chase_snapshot
+          notebook_task:
+            notebook_path: ./projection/sql/create_chase_projection.sql
+            source: WORKSPACE
+            warehouse_id: ${var.chase_alert_warehouse_id}
+      environments:
+        - environment_key: chase_projection
+          spec:
+            client: '4'
+            dependencies:
+              - databricks-sdk==0.81.0
+              - psycopg[binary]==3.2.10
+
+  alerts:
+    approved_chase_digest:
+      display_name: '[${bundle.target}] Approved chase reminder digest'
+      custom_summary: '[{{ALERT_STATUS}}] {{ALERT_NAME}} — approved reminder digest'
+      custom_description: |
+        Human-approved internal reminders for this approval window:
+
+        {{QUERY_RESULT_TABLE}}
+
+        The email table includes at most 100 rows. Check overflow_count in the table; values above zero mean additional approved reminders are available in the approved_chase_reminders view.
+      warehouse_id: ${var.chase_alert_warehouse_id}
+      run_as:
+        service_principal_name: ${var.chase_alert_run_as_sp}
+      query_text: |
+        SELECT
+          task_name,
+          owner_email,
+          item_reference,
+          due_at,
+          concat(replace(offset_kind, '_', ' '), ' ', offset_days, ' day(s)') AS offset,
+          count(*) OVER () AS reminder_count,
+          greatest(count(*) OVER () - 100, 0) AS overflow_count
+        FROM `felix_demo_catalog`.`genie-automations`.`approved_chase_reminders`
+        ORDER BY due_at
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: reminder_count
+          display: reminder_count
+        threshold:
+          value:
+            double_value: 0
+        empty_result_state: OK
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 0
+          subscriptions:
+            - destination_id: ${var.chase_notification_destination_id}
+      schedule:
+        quartz_cron_schedule: ${var.chase_alert_cron}
+        timezone_id: UTC
+        pause_status: PAUSED
 
 targets:
   default:
