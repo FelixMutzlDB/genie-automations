@@ -44,7 +44,9 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
       CREATE TABLE genie_spike.task(
         task_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        owner_id TEXT NOT NULL
+        owner_id TEXT NOT NULL,
+        task_type TEXT NOT NULL,
+        status TEXT NOT NULL
       );
       CREATE TABLE genie_spike.task_member(
         task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
@@ -65,12 +67,45 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
         dest_table TEXT NOT NULL,
         PRIMARY KEY(dest_catalog,dest_schema,dest_table)
       );
-      INSERT INTO genie_spike.task(task_id,name,owner_id) VALUES
-        ('task-a','Task A','${roles.owner}'),
-        ('task-b','Task B','${roles.outsider}');
+      CREATE TABLE genie_spike.destination_binding(
+        binding_id UUID PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
+        dest_catalog TEXT NOT NULL,
+        dest_schema TEXT NOT NULL,
+        dest_table TEXT NOT NULL,
+        write_scope JSONB NOT NULL,
+        status TEXT NOT NULL
+      );
+      CREATE TABLE genie_spike.remittance(
+        remittance_id TEXT PRIMARY KEY,
+        subsidiary_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        total_amount NUMERIC(18,2) NOT NULL,
+        entity_version INTEGER NOT NULL
+      );
+      CREATE TABLE genie_spike.allocation(
+        allocation_id TEXT PRIMARY KEY,
+        remittance_id TEXT NOT NULL REFERENCES genie_spike.remittance(remittance_id),
+        amount NUMERIC(18,2) NOT NULL
+      );
+      INSERT INTO genie_spike.task(task_id,name,owner_id,task_type,status) VALUES
+        ('task-a','Task A','${roles.owner}','reconciliation','active'),
+        ('task-b','Task B','${roles.outsider}','receivables','active');
       INSERT INTO genie_spike.task_member(task_id,user_id,role) VALUES
         ('task-a','${roles.owner}','owner'),
-        ('task-a','${roles.member}','member');
+        ('task-a','${roles.member}','member'),
+        ('task-b','${roles.outsider}','owner');
+      INSERT INTO genie_spike.destination_binding(
+        binding_id,task_id,dest_catalog,dest_schema,dest_table,write_scope,status) VALUES
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','task-a','test_catalog','genie_spike','allocation',
+          '{"change_types":["allocation_upsert"]}','active'),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','task-b','test_catalog','genie_spike','allocation',
+          '{"change_types":["allocation_upsert"]}','active');
+      INSERT INTO genie_spike.remittance(remittance_id,subsidiary_id,period,total_amount,entity_version) VALUES
+        ('REM-SHARED-1','EU','2026-09',100.00,1),
+        ('REM-SHARED-2','EU','2026-09',50.00,1);
+      INSERT INTO genie_spike.allocation(allocation_id,remittance_id,amount) VALUES
+        ('ALLOC-1','REM-SHARED-1',25.00);
     `);
 
     const migration = readFileSync(new URL('../../migrations/003_chase_reminders.sql', import.meta.url), 'utf8')
@@ -80,33 +115,18 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
       .join(identifier(roles.obo));
     await client.query(migration);
     // Migration 002 grants these in deployed environments; reproduce that prerequisite here.
-    await client.query(`GRANT USAGE ON SCHEMA genie_spike TO ${identifier(roles.obo)}, ${identifier(roles.admin)}`);
-    await client.query(`
-      CREATE TABLE genie_spike.chase_batch(
-        batch_id UUID PRIMARY KEY,
-        task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
-        evaluated_at TIMESTAMPTZ NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending' CONSTRAINT chase_batch_status_check CHECK(status IN ('pending')),
-        transport_adapter TEXT NOT NULL DEFAULT 'noop'
-          CONSTRAINT chase_batch_transport_adapter_check CHECK(transport_adapter='noop'),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE TABLE genie_spike.chase_delivery(
-        delivery_id UUID PRIMARY KEY,
-        batch_id UUID NOT NULL REFERENCES genie_spike.chase_batch(batch_id),
-        task_id TEXT NOT NULL REFERENCES genie_spike.task(task_id),
-        item_reference TEXT NOT NULL,
-        due_at TIMESTAMPTZ NOT NULL,
-        offset_kind TEXT NOT NULL CHECK(offset_kind IN ('approach','post_due')),
-        offset_days INTEGER NOT NULL CHECK(offset_days>0),
-        checkpoint_at TIMESTAMPTZ NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending' CONSTRAINT chase_delivery_status_check CHECK(status IN ('pending')),
-        transport_adapter TEXT NOT NULL DEFAULT 'noop'
-          CONSTRAINT chase_delivery_transport_adapter_check CHECK(transport_adapter='noop'),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE(task_id,item_reference,due_at,offset_kind,offset_days)
-      );
-    `);
+    await client.query(
+      `GRANT USAGE ON SCHEMA genie_spike TO ${identifier(roles.obo)}, ${identifier(roles.admin)}, ${identifier(roles.scheduler)}`
+    );
+    const schedulerMigration = readFileSync(
+      new URL('../../migrations/004_chase_scheduler.sql', import.meta.url),
+      'utf8'
+    )
+      .split(':"admin_role"')
+      .join(identifier(roles.admin))
+      .split(':"scheduler_role"')
+      .join(identifier(roles.scheduler));
+    await client.query(schedulerMigration);
     const transportMigration = readFileSync(
       new URL('../../migrations/005_chase_transport.sql', import.meta.url),
       'utf8'
@@ -214,6 +234,44 @@ describePostgres('chase SECURITY DEFINER authorization (Postgres integration)', 
       `SELECT state FROM genie_spike.chase_item_status WHERE task_id='task-a'`
     );
     expect(resolved.rows[0]?.state).toBe('resolved');
+  });
+
+  it('evaluates the taskless shared ledger and rejects a second enabled schedule owner', async () => {
+    const remittanceColumns = await client.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema='genie_spike' AND table_name='remittance'
+        ORDER BY ordinal_position`
+    );
+    expect(remittanceColumns.rows.map((row) => row.column_name)).toEqual([
+      'remittance_id',
+      'subsidiary_id',
+      'period',
+      'total_amount',
+      'entity_version',
+    ]);
+
+    await asPrincipal(roles.scheduler, async () => {
+      const items = await client.query(
+        `SELECT item_reference,outstanding_amount
+           FROM genie_spike.get_chase_scheduler_items('task-a')`
+      );
+      expect(items.rows).toEqual([
+        { item_reference: 'REM-SHARED-1', outstanding_amount: '75.00' },
+        { item_reference: 'REM-SHARED-2', outstanding_amount: '50.00' },
+      ]);
+    });
+
+    await asPrincipal(roles.outsider, async () => {
+      await expect42501(
+        `SELECT * FROM genie_spike.save_task_schedule_config(
+          $1,true,'daily',2,NULL,ARRAY[7,2],ARRAY[1,7,14],TIME '18:00',TIME '08:00','Europe/Berlin')`,
+        ['task-b']
+      );
+    });
+    const secondConfig = await client.query(
+      `SELECT 1 FROM genie_spike.task_schedule_config WHERE task_id='task-b'`
+    );
+    expect(secondConfig.rowCount).toBe(0);
   });
 
   it('denies member and outsider batch approval without changing outbox state, then allows the owner', async () => {

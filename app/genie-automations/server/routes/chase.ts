@@ -58,6 +58,16 @@ function friendlyFailure(res: Response): void {
   res.status(500).json({ error: 'Reminder settings are unavailable right now. Please try again.' });
 }
 
+function isSharedLedgerOwnerConflict(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const dbError = error as { code?: unknown; message?: unknown };
+  return (
+    dbError.code === '42501' &&
+    typeof dbError.message === 'string' &&
+    dbError.message.includes('shared receivables ledger already has an enabled chase schedule')
+  );
+}
+
 async function logFailure(appkit: ChaseAppKit, req: Request, action: string): Promise<void> {
   const actor = actorOf(req);
   if (!actor) return;
@@ -137,11 +147,10 @@ async function evaluate(db: UserDb, taskId: string, actor: string, now: Date): P
             r.total_amount-COALESCE(SUM(a.amount),0) AS remaining_amount
       FROM ${SCHEMA}.remittance r
        LEFT JOIN ${SCHEMA}.allocation a ON a.remittance_id=r.remittance_id
-      WHERE r.task_id=$1
       GROUP BY r.remittance_id,r.period,r.total_amount
      HAVING r.total_amount-COALESCE(SUM(a.amount),0)>0
       ORDER BY r.remittance_id`,
-    [taskId]
+    []
   );
   const activeReferences: string[] = [];
   for (const row of source.rows) {
@@ -294,8 +303,14 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
           ]
         );
         res.json(result.rows[0]);
-      } catch {
+      } catch (error) {
         await logFailure(appkit, req, 'chase_schedule_saved');
+        if (isSharedLedgerOwnerConflict(error)) {
+          res.status(409).json({
+            error: 'Reminders are already enabled for another automation using this shared receivables ledger.',
+          });
+          return;
+        }
         friendlyFailure(res);
       }
     });
@@ -312,6 +327,20 @@ export function setupChaseRoutes(appkit: ChaseAppKit): void {
         }
         if (!RECEIVABLE_TASK_TYPES.has(access.taskType)) {
           res.status(400).json({ error: 'Reminders are currently available for receivables automations only.' });
+          return;
+        }
+        const binding = await db.query(
+          `SELECT EXISTS(
+             SELECT 1 FROM ${SCHEMA}.destination_binding b
+              WHERE b.task_id=$1 AND b.status='active'
+                AND b.dest_schema='genie_spike'
+                AND b.dest_table IN ('allocation','remittance')
+                AND b.write_scope->'change_types'='["allocation_upsert"]'::jsonb
+           ) AS active`,
+          [req.params.id]
+        );
+        if (binding.rows[0]?.['active'] !== true) {
+          res.status(400).json({ error: 'This automation needs an active receivables destination before reminders can refresh.' });
           return;
         }
         const itemCount = await evaluate(db, req.params.id, access.actor, new Date());
