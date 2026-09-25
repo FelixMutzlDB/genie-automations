@@ -42,6 +42,14 @@ const scheduleSchema = z
   })
   .strict();
 
+const batchActionSchema = z
+  .object({
+    action: z.enum(['approve', 'archive']),
+    note: z.string().trim().max(1000).default(''),
+    confirmed: z.literal(true),
+  })
+  .strict();
+
 function actorOf(req: Request): string {
   return (req.header('x-forwarded-email') ?? '').trim().toLowerCase();
 }
@@ -167,6 +175,71 @@ async function evaluate(db: UserDb, taskId: string, actor: string, now: Date): P
 
 export function setupChaseRoutes(appkit: ChaseAppKit): void {
   appkit.server.extend((app) => {
+    app.get('/api/reminders/approval-queue', async (req, res) => {
+      try {
+        const actor = actorOf(req);
+        if (!actor) {
+          res.status(403).json({ error: 'You do not have access to reminder approvals.' });
+          return;
+        }
+        const result = await appkit.lakebase.asUser(req).query(
+          `SELECT batch_id,task_id,task_name,owner_email,evaluated_at,item_count,
+                  offset_kinds,due_dates,item_preview
+             FROM ${SCHEMA}.get_pending_chase_batches()`
+        );
+        res.json({ batches: result.rows });
+      } catch {
+        res.status(500).json({ error: 'The reminder approval queue is unavailable right now. Please try again.' });
+      }
+    });
+
+    app.post('/api/reminders/batches/:batchId/action', async (req, res) => {
+      const parsed = batchActionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Confirm the reminder decision and try again.' });
+        return;
+      }
+      try {
+        const actor = actorOf(req);
+        if (!actor) {
+          res.status(403).json({ error: 'You do not have access to reminder approvals.' });
+          return;
+        }
+        const db = appkit.lakebase.asUser(req);
+        // This function applies the same owner-or-DB-trusted-approver filter as the mutation.
+        const queue = await db.query(`SELECT * FROM ${SCHEMA}.get_pending_chase_batches()`);
+        const selected = queue.rows.find((row) => row['batch_id'] === req.params.batchId);
+        if (!selected) {
+          res.status(403).json({ error: 'This reminder batch is unavailable or you are not allowed to review it.' });
+          return;
+        }
+        if (!['owner', 'collections_approver'].includes(String(selected['reviewer_role']))) {
+          res.status(403).json({ error: 'Only the automation owner or a collections approver can review this batch.' });
+          return;
+        }
+        const functionName = parsed.data.action === 'approve' ? 'approve_chase_batch' : 'archive_chase_batch';
+        const result = await db.query(`SELECT * FROM ${SCHEMA}.${functionName}($1::uuid,$2::text)`, [
+          req.params.batchId,
+          parsed.data.note,
+        ]);
+        const audit = result.rows[0];
+        if (!audit) {
+          res.status(409).json({ error: 'This reminder batch was already reviewed. Refresh the queue to continue.' });
+          return;
+        }
+        const count = Number(audit['item_count'] ?? 0);
+        res.json({
+          message:
+            parsed.data.action === 'approve'
+              ? `${count} reminder${count === 1 ? '' : 's'} approved for the next internal digest.`
+              : `${count} reminder${count === 1 ? '' : 's'} archived. Nothing will be announced.`,
+          audit,
+        });
+      } catch {
+        res.status(500).json({ error: 'That reminder decision could not be saved. Nothing was changed.' });
+      }
+    });
+
     app.get('/api/tasks/:id/reminders/config', async (req, res) => {
       try {
         const db = appkit.lakebase.asUser(req);

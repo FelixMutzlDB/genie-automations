@@ -23,8 +23,15 @@ import {
   Skeleton,
   Switch,
 } from '@databricks/appkit-ui/react';
-import { evaluateReminders, loadReminderConfig, loadReminderPreview, saveReminderConfig } from '../lib/reminders';
-import type { ReminderConfig, ReminderPreview, Task } from '../types';
+import {
+  evaluateReminders,
+  loadChaseApprovalQueue,
+  loadReminderConfig,
+  loadReminderPreview,
+  reviewChaseBatch,
+  saveReminderConfig,
+} from '../lib/reminders';
+import type { ChaseApprovalBatch, ReminderConfig, ReminderPreview, Task } from '../types';
 
 const DEFAULT_CONFIG: ReminderConfig = {
   enabled: true,
@@ -66,6 +73,7 @@ function dueDate(value: string, timezone: string): string {
 export function RemindersPanel({ task }: { task: Task }) {
   const [config, setConfig] = useState<ReminderConfig>(DEFAULT_CONFIG);
   const [preview, setPreview] = useState<ReminderPreview | null>(null);
+  const [approvalQueue, setApprovalQueue] = useState<ChaseApprovalBatch[]>([]);
   const [canEdit, setCanEdit] = useState(false);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -76,17 +84,36 @@ export function RemindersPanel({ task }: { task: Task }) {
     setLoading(true);
     setError(null);
     try {
-      const [settings, nextPreview] = await Promise.all([
+      const [settings, nextPreview, queue] = await Promise.all([
         loadReminderConfig(task.task_id),
         loadReminderPreview(task.task_id),
+        loadChaseApprovalQueue(),
       ]);
       setConfig(settings.config ?? DEFAULT_CONFIG);
       setCanEdit(settings.can_edit);
       setPreview(nextPreview);
+      setApprovalQueue(queue.batches);
     } catch (loadError) {
       setError(errorMessage(loadError));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const reviewBatch = async (batch: ChaseApprovalBatch, action: 'approve' | 'archive') => {
+    const verb = action === 'approve' ? 'approve' : 'archive';
+    if (!window.confirm(`Confirm you want to ${verb} ${batch.item_count} reminder${batch.item_count === 1 ? '' : 's'} for ${batch.task_name}?`)) return;
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await reviewChaseBatch(batch.batch_id, action);
+      setApprovalQueue((current) => current.filter((item) => item.batch_id !== batch.batch_id));
+      setNotice(result.message);
+    } catch (reviewError) {
+      setError(errorMessage(reviewError));
+    } finally {
+      setWorking(false);
     }
   };
 
@@ -152,6 +179,47 @@ export function RemindersPanel({ task }: { task: Task }) {
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Approval queue</CardTitle>
+          <CardDescription>
+            Review each generated batch before it can enter the internal email digest.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {approvalQueue.length ? (
+            approvalQueue.map((batch) => (
+              <div key={batch.batch_id} className="space-y-3 rounded-md border p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{batch.task_name}</p>
+                    <p className="text-xs text-muted-foreground">Owner: {batch.owner_email}</p>
+                  </div>
+                  <Badge variant="outline">{batch.item_count} affected</Badge>
+                </div>
+                <p className="text-sm">
+                  {batch.offset_kinds.join(', ').replaceAll('_', ' ')} · due{' '}
+                  {batch.due_dates.map((value) => new Date(value).toLocaleDateString('en-GB')).join(', ')}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Preview: {batch.item_preview.join(', ')}
+                  {batch.item_count > batch.item_preview.length ? ` and ${batch.item_count - batch.item_preview.length} more` : ''}
+                </p>
+                <div className="flex gap-2">
+                  <Button disabled={working} onClick={() => void reviewBatch(batch, 'approve')}>Approve digest</Button>
+                  <Button variant="outline" disabled={working} onClick={() => void reviewBatch(batch, 'archive')}>Reject and archive</Button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <Empty>
+              <EmptyHeader><EmptyTitle>No batches awaiting approval</EmptyTitle></EmptyHeader>
+              <EmptyDescription>New scheduler output will appear here for an owner or collections approver.</EmptyDescription>
+            </Empty>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
